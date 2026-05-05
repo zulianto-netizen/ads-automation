@@ -163,31 +163,48 @@ function formatRecommendation(rec, index) {
   const action = rec.action_type || "REVIEW_CAMPAIGN";
   const impact = Number(rec.estimated_daily_impact || 0);
 
-  let tag = `${index}. [${action}|camp:${campaign}`;
-
-  if (rec.ad_group_key) {
-    tag += `|ag:${rec.ad_group_key}`;
-  }
-
-  if (rec.keyword_text) {
-    tag += `|kw:${rec.keyword_text}`;
-  }
-
-  tag += `]`;
+  let tag = `${index}. [${action}|camp:${campaign}]`;
 
   const current = rec.current_value || {};
-  const spend = Number(current.cost || current.spend || impact || 0);
+  const spend = Number(current.cost || current.spend || 0);
   const roasValue = current.roas !== undefined ? Number(current.roas) : null;
   const clicks = current.clicks !== undefined ? Number(current.clicks) : null;
   const conversions = current.conversions !== undefined ? Number(current.conversions) : null;
 
-  const spendPart = spend > 0 ? `${money(spend)} spend` : "";
-  const roasPart = roasValue !== null && !Number.isNaN(roasValue) ? `${roas(roasValue)} ROAS` : "";
-  const clicksPart = clicks !== null && !Number.isNaN(clicks) ? `${clicks} clicks` : "";
-  const convPart = conversions !== null && !Number.isNaN(conversions) ? `${conversions} conv` : "";
+  const metricParts = [];
 
-  const metricParts = [spendPart, roasPart, clicksPart, convPart].filter(Boolean);
-  const metricText = metricParts.length ? metricParts.join(", ") : "review performance";
+  if (spend > 0) metricParts.push(`${money(spend)} spend`);
+  if (roasValue !== null && !Number.isNaN(roasValue)) metricParts.push(`${roas(roasValue)} ROAS`);
+  if (clicks !== null && !Number.isNaN(clicks)) metricParts.push(`${clicks} clicks`);
+  if (conversions !== null && !Number.isNaN(conversions)) metricParts.push(`${conversions} conv`);
+
+  const metricText = metricParts.length ? metricParts.join(", ") : "";
+
+  if (action === "ADD_NEGATIVES") {
+    const keywords = rec.proposed_value?.negative_keywords || [];
+    const keywordText = keywords.length ? ` KWs: ${keywords.join(", ")}.` : "";
+    return `${tag} ${money(impact)} wasted spend — add negatives.${keywordText} Est. avoid ${money(impact)}/day.`;
+  }
+
+  if (action === "ADD_KEYWORD") {
+    const reason = String(rec.reason || "");
+    const reasonMatch =
+      reason.match(/Search term ['"]([^'"]+)['"]/i) ||
+      reason.match(/term ['"]([^'"]+)['"]/i);
+
+    const keyword =
+      rec.proposed_value?.keyword ||
+      rec.proposed_value?.keywords?.[0] ||
+      rec.keyword_text ||
+      reasonMatch?.[1] ||
+      "";
+
+    const keywordText = keyword
+      ? ` Add "${keyword}" as exact.`
+      : " Add converting term as exact keyword.";
+
+    return `${tag} converting search term — add as managed keyword.${keywordText} Est. +${money(impact)}/day cv.`;
+  }
 
   if (action === "REVIEW_SEARCH_TERMS") {
     return `${tag} ${metricText} — pull search terms before adding negatives. Est. review ${money(impact)}/day.`;
@@ -207,12 +224,6 @@ function formatRecommendation(rec, index) {
 
   if (action === "RAISE_BUDGET") {
     return `${tag} ${metricText} — raise budget carefully. :hourglass_flowing_sand: Est. +${money(impact)}/day cv.`;
-  }
-
-  if (action === "ADD_NEGATIVES") {
-    const keywords = rec.proposed_value?.negative_keywords || [];
-    const keywordText = keywords.length ? ` KWs: ${keywords.join(", ")}.` : "";
-    return `${tag} ${metricText} — add negatives.${keywordText} Est. avoid ${money(impact)}/day.`;
   }
 
   if (action === "PAUSE_KEYWORD") {
