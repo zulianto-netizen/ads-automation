@@ -159,48 +159,67 @@ function buildPatterns(campaigns, marketLabel) {
 }
 
 function formatRecommendation(rec, index) {
-  let line = `${index}. [${rec.action_type}|camp:${rec.campaign_key || "unknown"}`;
+  const campaign = rec.campaign_key || "unknown";
+  const action = rec.action_type || "REVIEW_CAMPAIGN";
+  const impact = Number(rec.estimated_daily_impact || 0);
+
+  let tag = `${index}. [${action}|camp:${campaign}`;
 
   if (rec.ad_group_key) {
-    line += `|ag:${rec.ad_group_key}`;
+    tag += `|ag:${rec.ad_group_key}`;
   }
 
   if (rec.keyword_text) {
-    line += `|kw:${rec.keyword_text}`;
+    tag += `|kw:${rec.keyword_text}`;
   }
 
-  line += `] `;
+  tag += `]`;
 
-  const impact = Number(rec.estimated_daily_impact || 0);
+  const current = rec.current_value || {};
+  const spend = Number(current.cost || current.spend || impact || 0);
+  const roasValue = current.roas !== undefined ? Number(current.roas) : null;
+  const clicks = current.clicks !== undefined ? Number(current.clicks) : null;
+  const conversions = current.conversions !== undefined ? Number(current.conversions) : null;
 
-  if (rec.action_type === "INVESTIGATE_TRACKING") {
-    line += `${rec.reason}. Est. review ${money(impact)}/day spend or value at risk.`;
-  } else if (rec.action_type === "REVIEW_SEARCH_TERMS") {
-    line += `${rec.reason}. Pull search terms before adding negatives. Est. review ${money(impact)}/day spend.`;
-  } else if (rec.action_type === "REVIEW_CAMPAIGN") {
-    line += `${rec.reason}. Est. review ${money(impact)}/day spend.`;
-  } else if (
-    rec.action_type === "LOWER_BUDGET" ||
-    rec.action_type === "DECREASE_BUDGET"
-  ) {
-    line += `${rec.reason}. :hourglass_flowing_sand: Est. save ${money(
-      impact
-    )}/day.`;
-  } else if (rec.action_type === "RAISE_BUDGET") {
-    line += `${rec.reason}. :hourglass_flowing_sand: Est. +${money(impact)}/day cv.`;
-  } else if (rec.action_type === "ADD_NEGATIVES") {
+  const spendPart = spend > 0 ? `${money(spend)} spend` : "";
+  const roasPart = roasValue !== null && !Number.isNaN(roasValue) ? `${roas(roasValue)} ROAS` : "";
+  const clicksPart = clicks !== null && !Number.isNaN(clicks) ? `${clicks} clicks` : "";
+  const convPart = conversions !== null && !Number.isNaN(conversions) ? `${conversions} conv` : "";
+
+  const metricParts = [spendPart, roasPart, clicksPart, convPart].filter(Boolean);
+  const metricText = metricParts.length ? metricParts.join(", ") : "review performance";
+
+  if (action === "REVIEW_SEARCH_TERMS") {
+    return `${tag} ${metricText} — pull search terms before adding negatives. Est. review ${money(impact)}/day.`;
+  }
+
+  if (action === "REVIEW_CAMPAIGN") {
+    return `${tag} ${metricText} — review targeting, creative, and landing page fit. Est. review ${money(impact)}/day.`;
+  }
+
+  if (action === "MONITOR") {
+    return `${tag} ${metricText} — monitor 2–3 days before changing spend.`;
+  }
+
+  if (action === "DECREASE_BUDGET" || action === "LOWER_BUDGET") {
+    return `${tag} ${metricText} — decrease budget carefully. :hourglass_flowing_sand: Est. save ${money(impact)}/day.`;
+  }
+
+  if (action === "RAISE_BUDGET") {
+    return `${tag} ${metricText} — raise budget carefully. :hourglass_flowing_sand: Est. +${money(impact)}/day cv.`;
+  }
+
+  if (action === "ADD_NEGATIVES") {
     const keywords = rec.proposed_value?.negative_keywords || [];
-    const keywordText = keywords.length ? ` Keywords: ${keywords.join(", ")}.` : "";
-    line += `${rec.reason}.${keywordText} Est. avoid ${money(impact)}/day.`;
-  } else if (rec.action_type === "PAUSE_KEYWORD") {
-    line += `${rec.reason}. Est. avoid ${money(impact)}/day.`;
-  } else if (rec.action_type === "MONITOR") {
-    line += `${rec.reason}. Monitor before changing spend.`;
-  } else {
-    line += `${rec.reason}. Est. impact ${money(impact)}/day.`;
+    const keywordText = keywords.length ? ` KWs: ${keywords.join(", ")}.` : "";
+    return `${tag} ${metricText} — add negatives.${keywordText} Est. avoid ${money(impact)}/day.`;
   }
 
-  return line;
+  if (action === "PAUSE_KEYWORD") {
+    return `${tag} ${metricText} — pause keyword. Est. avoid ${money(impact)}/day.`;
+  }
+
+  return `${tag} ${metricText} — ${action}. Est. impact ${money(impact)}/day.`;
 }
 
 function buildMarketSection({ title, cc, campaigns, recommendations, date }) {
@@ -238,12 +257,15 @@ function buildMarketSection({ title, cc, campaigns, recommendations, date }) {
   if (recommendations.length === 0) {
     lines.push("No recommendations for this market.");
   } else {
+    const maxRecs = 8;
+
     recommendations
       .sort(
         (a, b) =>
           Number(b.estimated_daily_impact || 0) -
           Number(a.estimated_daily_impact || 0)
       )
+      .slice(0, maxRecs)
       .forEach((rec, i) => {
         lines.push(formatRecommendation(rec, i + 1));
       });
