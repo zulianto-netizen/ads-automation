@@ -1,29 +1,235 @@
 require("dotenv").config({ override: true });
 const { Client } = require("pg");
 
-function formatRecommendation(rec) {
-  let line = `${rec.recommendation_number}. [${rec.action_type}|campaign_id:${rec.campaign_key || "unknown"}`;
+function money(value) {
+  return `$${Number(value || 0).toFixed(2)}`;
+}
+
+function roas(value) {
+  return `${Number(value || 0).toFixed(2)}x`;
+}
+
+function pct(value) {
+  if (value === null || value === undefined) return "n/a";
+  return `${Number(value).toFixed(2)}%`;
+}
+
+function classifyMarket(campaignName = "") {
+  const name = campaignName.toLowerCase();
+
+  if (
+    name.includes("secondary market") ||
+    name.includes("secondary") ||
+    name.includes("_secondary_") ||
+    name.includes(" secondary ")
+  ) {
+    return "secondary";
+  }
+
+  if (
+    name.includes("main market") ||
+    name.includes("main") ||
+    name.includes("_main_") ||
+    name.includes(" main ")
+  ) {
+    return "main";
+  }
+
+  return "unknown";
+}
+
+function classifyType(campaignName = "") {
+  const name = campaignName.toLowerCase();
+
+  if (name.includes("dg") || name.includes("demand gen")) return "DG";
+  if (name.includes("sem") || name.includes("search")) return "SEM";
+
+  return "OTHER";
+}
+
+function isMainRecommendation(rec) {
+  return classifyMarket(rec.campaign_key || "") === "main";
+}
+
+function isSecondaryRecommendation(rec) {
+  return classifyMarket(rec.campaign_key || "") === "secondary";
+}
+
+function summarizeGroup(campaigns) {
+  const active = campaigns.filter((c) => String(c.status || "").toUpperCase() !== "REMOVED");
+
+  const total = active.reduce(
+    (acc, c) => {
+      acc.cost += Number(c.cost || 0);
+      acc.clicks += Number(c.clicks || 0);
+      acc.impressions += Number(c.impressions || 0);
+      acc.conversions += Number(c.conversions || 0);
+      acc.conversion_value += Number(c.conversion_value || 0);
+      return acc;
+    },
+    {
+      cost: 0,
+      clicks: 0,
+      impressions: 0,
+      conversions: 0,
+      conversion_value: 0,
+    }
+  );
+
+  total.roas = total.cost > 0 ? total.conversion_value / total.cost : 0;
+
+  return {
+    active_count: active.length,
+    ...total,
+  };
+}
+
+function summarizeType(campaigns, type, threshold) {
+  const filtered = campaigns.filter((c) => classifyType(c.campaign_name || c.campaign_key) === type);
+  const totals = summarizeGroup(filtered);
+
+  const roasValues = filtered
+    .map((c) => Number(c.roas || 0))
+    .filter((v) => !Number.isNaN(v));
+
+  const minRoas = roasValues.length ? Math.min(...roasValues) : 0;
+  const maxRoas = roasValues.length ? Math.max(...roasValues) : 0;
+  const belowCount = filtered.filter((c) => Number(c.roas || 0) < threshold).length;
+
+  return {
+    type,
+    count: filtered.length,
+    threshold,
+    ...totals,
+    min_roas: minRoas,
+    max_roas: maxRoas,
+    below_count: belowCount,
+  };
+}
+
+function buildPatterns(campaigns, marketLabel) {
+  const sortedByCost = [...campaigns].sort((a, b) => Number(b.cost || 0) - Number(a.cost || 0));
+  const sortedByRoas = [...campaigns]
+    .filter((c) => Number(c.cost || 0) > 0)
+    .sort((a, b) => Number(b.roas || 0) - Number(a.roas || 0));
+
+  const patterns = [];
+
+  const best = sortedByRoas[0];
+  if (best) {
+    patterns.push(
+      `• ${best.campaign_name} ${roas(best.roas)} on ${money(best.cost)} — strongest ${marketLabel} performer by ROAS in yesterday’s data.`
+    );
+  }
+
+  const worstPaid = sortedByCost.find((c) => Number(c.cost || 0) > 0 && Number(c.conversions || 0) === 0);
+  if (worstPaid) {
+    patterns.push(
+      `• ${worstPaid.campaign_name} ${roas(worstPaid.roas)} on ${money(worstPaid.cost)} — spent with 0 conversions; review search terms, tracking, and campaign intent before scaling.`
+    );
+  }
+
+  const lowRoas = sortedByCost.find((c) => Number(c.cost || 0) >= 10 && Number(c.roas || 0) > 0 && Number(c.roas || 0) < 1);
+  if (lowRoas) {
+    patterns.push(
+      `• ${lowRoas.campaign_name} ${roas(lowRoas.roas)} on ${money(lowRoas.cost)} — conversion value is very low relative to spend.`
+    );
+  }
+
+  const highSpend = sortedByCost[0];
+  if (highSpend && !patterns.some((p) => p.includes(highSpend.campaign_name))) {
+    patterns.push(
+      `• ${highSpend.campaign_name} ${roas(highSpend.roas)} on ${money(highSpend.cost)} — highest spend campaign in ${marketLabel}; monitor efficiency closely.`
+    );
+  }
+
+  if (patterns.length === 0) {
+    patterns.push("• No clear campaign-level pattern detected from yesterday’s snapshot.");
+  }
+
+  return patterns.slice(0, 5);
+}
+
+function formatRecommendation(rec, index) {
+  let line = `${index}. [${rec.action_type}|camp:${rec.campaign_key || "unknown"}`;
 
   if (rec.ad_group_key) {
-    line += `|adgroup:${rec.ad_group_key}`;
+    line += `|ag:${rec.ad_group_key}`;
+  }
+
+  if (rec.keyword_text) {
+    line += `|kw:${rec.keyword_text}`;
   }
 
   line += `] `;
 
+  const impact = Number(rec.estimated_daily_impact || 0);
+
   if (rec.action_type === "INVESTIGATE_TRACKING") {
-    line += `Investigate tracking issue. ${rec.reason}. Est. avoid $${rec.estimated_daily_impact || 0}/day cv loss.`;
+    line += `${rec.reason}. Est. review ${money(impact)}/day spend or value at risk.`;
+  } else if (rec.action_type === "REVIEW_SEARCH_TERMS") {
+    line += `${rec.reason}. Pull search terms before adding negatives. Est. review ${money(impact)}/day spend.`;
+  } else if (rec.action_type === "REVIEW_CAMPAIGN") {
+    line += `${rec.reason}. Est. review ${money(impact)}/day spend.`;
+  } else if (rec.action_type === "LOWER_BUDGET" || rec.action_type === "DECREASE_BUDGET") {
+    line += `${rec.reason}. :hourglass_flowing_sand: Est. save ${money(impact)}/day.`;
   } else if (rec.action_type === "RAISE_BUDGET") {
-    line += `${rec.campaign_key} raise budget recommendation. ${rec.reason}. Est. +$${rec.estimated_daily_impact || 0}/day cv.`;
+    line += `${rec.reason}. :hourglass_flowing_sand: Est. +${money(impact)}/day cv.`;
   } else if (rec.action_type === "ADD_NEGATIVES") {
     const keywords = rec.proposed_value?.negative_keywords || [];
-    line += `${rec.campaign_key} ${rec.ad_group_key || ""}: add negatives ${keywords.join(", ")}. ${rec.reason}. Est. avoid $${rec.estimated_daily_impact || 0}/day.`;
+    const keywordText = keywords.length ? ` Keywords: ${keywords.join(", ")}.` : "";
+    line += `${rec.reason}.${keywordText} Est. avoid ${money(impact)}/day.`;
   } else if (rec.action_type === "PAUSE_KEYWORD") {
-    line += `${rec.campaign_key} ${rec.ad_group_key || ""}: pause keyword ${rec.keyword_text || ""}. ${rec.reason}. Est. avoid $${rec.estimated_daily_impact || 0}/day.`;
+    line += `${rec.reason}. Est. avoid ${money(impact)}/day.`;
+  } else if (rec.action_type === "MONITOR") {
+    line += `${rec.reason}. Monitor before changing spend.`;
   } else {
-    line += `${rec.reason}`;
+    line += `${rec.reason}. Est. impact ${money(impact)}/day.`;
   }
 
   return line;
+}
+
+function buildMarketSection({ title, cc, campaigns, recommendations, date }) {
+  const totals = summarizeGroup(campaigns);
+  const sem = summarizeType(campaigns, "SEM", 10);
+  const dg = summarizeType(campaigns, "DG", 20);
+
+  const lines = [];
+
+  lines.push(`:bar_chart: *${title} DAILY ALERT — ${date}* — cc ${cc}`);
+  lines.push("");
+
+  lines.push(`${title} totals — ${money(totals.cost)} cost, ${totals.active_count} active campaigns`);
+  lines.push(
+    `• SEM: ${money(sem.cost)} → ${money(sem.conversion_value)} cv, ROAS ${roas(sem.roas)} ` +
+      `(range ${roas(sem.min_roas)}–${roas(sem.max_roas)}, ${sem.below_count} camps below ≥10x threshold)`
+  );
+  lines.push(
+    `• DG:  ${money(dg.cost)} → ${money(dg.conversion_value)} cv, ROAS ${roas(dg.roas)} ` +
+      `(range ${roas(dg.min_roas)}–${roas(dg.max_roas)}, ${dg.below_count} camps below ≥20x threshold)`
+  );
+  lines.push("");
+
+  lines.push("*Patterns*");
+  buildPatterns(campaigns, title).forEach((p) => lines.push(p));
+  lines.push("");
+
+  lines.push("*Top recommendations*");
+  if (recommendations.length === 0) {
+    lines.push("No recommendations for this market.");
+  } else {
+    recommendations
+      .sort((a, b) => Number(b.estimated_daily_impact || 0) - Number(a.estimated_daily_impact || 0))
+      .forEach((rec, i) => {
+        lines.push(formatRecommendation(rec, i + 1));
+      });
+  }
+
+  lines.push("");
+  lines.push("_Reply in thread: approve N | approve all | decline N | details N_");
+
+  return lines.join("\n");
 }
 
 async function buildLatestReport() {
@@ -57,40 +263,66 @@ async function buildLatestReport() {
       [alert.id]
     );
 
-    const alertDate =
-      alert.id.match(/\d{4}-\d{2}-\d{2}/)?.[0] ||
-      String(alert.alert_date).slice(0, 10);
+    const snapshotResult = await client.query(`
+      SELECT payload
+      FROM ads_metric_snapshots
+      WHERE source = 'google_ads_script'
+      ORDER BY created_at DESC
+      LIMIT 1;
+    `);
 
-    const lines = [];
-
-    lines.push(`:bar_chart: *MAIN MARKET DAILY ALERT — ${alertDate}*`);
-    lines.push("");
-    lines.push(`Alert ID: \`${alert.id}\``);
-    lines.push("");
-    lines.push("*Summary*");
-    lines.push(alert.raw_report_text || "Claude generated Google Ads performance report.");
-    lines.push("");
-    lines.push("*Top recommendations*");
-
-    if (recommendationResult.rows.length === 0) {
-      lines.push("No recommendations generated.");
-    } else {
-      recommendationResult.rows.forEach((rec) => {
-        lines.push(formatRecommendation(rec));
-      });
+    if (snapshotResult.rows.length === 0) {
+      throw new Error("No google_ads_script snapshot found.");
     }
 
-    lines.push("");
-    lines.push("*Approval commands for now*");
-    lines.push("Run locally:");
-    lines.push("```");
-    lines.push("node approve.js 1");
-    lines.push("node apply-approved.js");
-    lines.push("```");
-    lines.push("");
-    lines.push("_Slack approval buttons/thread commands will come later. This version posts the report only._");
+    const snapshot = snapshotResult.rows[0].payload;
+    const campaigns = snapshot.campaigns || [];
 
-    return lines.join("\n");
+    const mainCampaigns = campaigns.filter((c) => classifyMarket(c.campaign_name || c.campaign_key) === "main");
+    const secondaryCampaigns = campaigns.filter((c) => classifyMarket(c.campaign_name || c.campaign_key) === "secondary");
+
+    const recs = recommendationResult.rows;
+    const mainRecs = recs.filter(isMainRecommendation);
+    const secondaryRecs = recs.filter(isSecondaryRecommendation);
+
+    const date =
+      alert.id.match(/\d{4}-\d{2}-\d{2}/)?.[0] ||
+      snapshot.date ||
+      String(alert.alert_date).slice(0, 10);
+
+    const totalCost = Number(snapshot.account_totals?.cost || 0);
+    const totalCv = Number(snapshot.account_totals?.conversion_value || 0);
+    const totalRoas = totalCost > 0 ? totalCv / totalCost : 0;
+
+    const header = [
+      `*Google Ads Daily Report*`,
+      `Alert ID: \`${alert.id}\``,
+      `Account: ${snapshot.account_name || snapshot.account_id || alert.account_id || "-"}`,
+      `Overall: ${money(totalCost)} cost → ${money(totalCv)} cv, ROAS ${roas(totalRoas)}`,
+      "",
+      alert.raw_report_text ? `_${alert.raw_report_text}_` : "",
+      "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const mainSection = buildMarketSection({
+      title: "MAIN MARKET",
+      cc: "@Habibie",
+      campaigns: mainCampaigns,
+      recommendations: mainRecs,
+      date,
+    });
+
+    const secondarySection = buildMarketSection({
+      title: "SECONDARY MARKET",
+      cc: "@Desvantyo",
+      campaigns: secondaryCampaigns,
+      recommendations: secondaryRecs,
+      date,
+    });
+
+    return `${header}\n\n${mainSection}\n\n${secondarySection}`;
   } finally {
     await client.end();
   }
