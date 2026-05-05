@@ -286,11 +286,10 @@ Allowed action_type values:
 - REVIEW_POLICY
 - EXPAND_REMARKETING
 - ADD_AUDIENCE_SIGNAL
-- REVIEW_SEARCH_TERMS
-- REVIEW_CAMPAIGN
-- MONITOR
 
 Important:
+- Do not output REVIEW_CAMPAIGN, REVIEW_SEARCH_TERMS, MONITOR, REVIEW_ADGROUP, or INVESTIGATE_TRACKING as recommendations.
+- Recommendations must be direct actions with enough evidence.
 - Do NOT use INVESTIGATE_TRACKING as a numbered recommendation.
 - If attribution lag or tracking anomaly is suspected, include it only inside tracking_warning.
 - Do not classify every zero-conversion campaign as a tracking issue.
@@ -312,12 +311,12 @@ Keyword and budget rules:
 - Do not invent keywords, ad groups, budgets, Lost IS, policy status, or 7-day metrics.
 
 Recommendation quality rules:
-- If the data is not deep enough for a direct mutation, use REVIEW_CAMPAIGN, REVIEW_SEARCH_TERMS, or MONITOR.
+- If the data is not deep enough for a direct action, do not create a recommendation.
 - estimated_daily_impact must be a number.
 - If impact is uncertain but campaign spend is known, use the campaign cost as estimated_daily_impact instead of 0.
 - Sort recommendations by estimated_daily_impact descending.
 - Limit recommendations to the top 8 total. Prioritize direct ADD_NEGATIVES and ADD_KEYWORD actions from search_term_candidates.
-- Try to include recommendations for both Main Market and Secondary Market when evidence exists.
+- Try to include recommendations for both Main Market and Secondary Market only when direct-action evidence exists.
 - Recommendations should be practical, operational, concise, and not repetitive.
 - Keep each reason under 180 characters.
 - Prefer fewer high-confidence recommendations over many weak recommendations.
@@ -391,7 +390,7 @@ Output rules:
 - Use account_id exactly: "${metrics.account_id || ""}".
 - Recommendation numbers should start at 1.
 - Every recommendation id must be unique and should include the alert_id and recommendation number.
-- REVIEW_CAMPAIGN, REVIEW_SEARCH_TERMS, MONITOR, and REVIEW_POLICY should usually have requires_google_ads_mutation set to false.
+- REVIEW_POLICY should usually have requires_google_ads_mutation set to false.
 - DECREASE_BUDGET, RAISE_BUDGET, ADD_NEGATIVES, PAUSE_KEYWORD, ADJUST_TROAS, EXPAND_REMARKETING, and ADD_AUDIENCE_SIGNAL may require mutation only if enough evidence is present.
 - Exclude Branding campaigns.
 - Do not output recommendations for Branding campaigns.
