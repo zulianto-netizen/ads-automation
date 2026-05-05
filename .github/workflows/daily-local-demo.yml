@@ -1,10 +1,12 @@
-name: Daily Local Demo
+name: Daily Google Ads Snapshot Report
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "30 1 * * *"
 
 jobs:
-  run-demo:
+  generate-report:
     runs-on: ubuntu-latest
 
     steps:
@@ -19,8 +21,8 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Run full local demo
-        run: node run-full-local-demo.js
+      - name: Generate report from latest Google Ads Script snapshot
+        run: node run-script-snapshot-report.js
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
