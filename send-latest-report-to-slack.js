@@ -9,11 +9,6 @@ function roas(value) {
   return `${Number(value || 0).toFixed(2)}x`;
 }
 
-function pct(value) {
-  if (value === null || value === undefined) return "n/a";
-  return `${Number(value).toFixed(2)}%`;
-}
-
 function classifyMarket(campaignName = "") {
   const name = campaignName.toLowerCase();
 
@@ -47,16 +42,10 @@ function classifyType(campaignName = "") {
   return "OTHER";
 }
 
-function isMainRecommendation(rec) {
-  return classifyMarket(rec.campaign_key || "") === "main";
-}
-
-function isSecondaryRecommendation(rec) {
-  return classifyMarket(rec.campaign_key || "") === "secondary";
-}
-
 function summarizeGroup(campaigns) {
-  const active = campaigns.filter((c) => String(c.status || "").toUpperCase() !== "REMOVED");
+  const active = campaigns.filter(
+    (c) => String(c.status || "").toUpperCase() !== "REMOVED"
+  );
 
   const total = active.reduce(
     (acc, c) => {
@@ -85,7 +74,9 @@ function summarizeGroup(campaigns) {
 }
 
 function summarizeType(campaigns, type, threshold) {
-  const filtered = campaigns.filter((c) => classifyType(c.campaign_name || c.campaign_key) === type);
+  const filtered = campaigns.filter(
+    (c) => classifyType(c.campaign_name || c.campaign_key) === type
+  );
   const totals = summarizeGroup(filtered);
 
   const roasValues = filtered
@@ -108,7 +99,9 @@ function summarizeType(campaigns, type, threshold) {
 }
 
 function buildPatterns(campaigns, marketLabel) {
-  const sortedByCost = [...campaigns].sort((a, b) => Number(b.cost || 0) - Number(a.cost || 0));
+  const sortedByCost = [...campaigns].sort(
+    (a, b) => Number(b.cost || 0) - Number(a.cost || 0)
+  );
   const sortedByRoas = [...campaigns]
     .filter((c) => Number(c.cost || 0) > 0)
     .sort((a, b) => Number(b.roas || 0) - Number(a.roas || 0));
@@ -118,28 +111,43 @@ function buildPatterns(campaigns, marketLabel) {
   const best = sortedByRoas[0];
   if (best) {
     patterns.push(
-      `• ${best.campaign_name} ${roas(best.roas)} on ${money(best.cost)} — strongest ${marketLabel} performer by ROAS in yesterday’s data.`
+      `• ${best.campaign_name} ${roas(best.roas)} on ${money(
+        best.cost
+      )} — strongest ${marketLabel} performer by ROAS in yesterday’s data.`
     );
   }
 
-  const worstPaid = sortedByCost.find((c) => Number(c.cost || 0) > 0 && Number(c.conversions || 0) === 0);
+  const worstPaid = sortedByCost.find(
+    (c) => Number(c.cost || 0) > 0 && Number(c.conversions || 0) === 0
+  );
   if (worstPaid) {
     patterns.push(
-      `• ${worstPaid.campaign_name} ${roas(worstPaid.roas)} on ${money(worstPaid.cost)} — spent with 0 conversions; review search terms, tracking, and campaign intent before scaling.`
+      `• ${worstPaid.campaign_name} ${roas(worstPaid.roas)} on ${money(
+        worstPaid.cost
+      )} — spent with 0 conversions; review search terms, tracking, and campaign intent before scaling.`
     );
   }
 
-  const lowRoas = sortedByCost.find((c) => Number(c.cost || 0) >= 10 && Number(c.roas || 0) > 0 && Number(c.roas || 0) < 1);
+  const lowRoas = sortedByCost.find(
+    (c) =>
+      Number(c.cost || 0) >= 10 &&
+      Number(c.roas || 0) > 0 &&
+      Number(c.roas || 0) < 1
+  );
   if (lowRoas) {
     patterns.push(
-      `• ${lowRoas.campaign_name} ${roas(lowRoas.roas)} on ${money(lowRoas.cost)} — conversion value is very low relative to spend.`
+      `• ${lowRoas.campaign_name} ${roas(lowRoas.roas)} on ${money(
+        lowRoas.cost
+      )} — conversion value is very low relative to spend.`
     );
   }
 
   const highSpend = sortedByCost[0];
   if (highSpend && !patterns.some((p) => p.includes(highSpend.campaign_name))) {
     patterns.push(
-      `• ${highSpend.campaign_name} ${roas(highSpend.roas)} on ${money(highSpend.cost)} — highest spend campaign in ${marketLabel}; monitor efficiency closely.`
+      `• ${highSpend.campaign_name} ${roas(highSpend.roas)} on ${money(
+        highSpend.cost
+      )} — highest spend campaign in ${marketLabel}; monitor efficiency closely.`
     );
   }
 
@@ -171,8 +179,13 @@ function formatRecommendation(rec, index) {
     line += `${rec.reason}. Pull search terms before adding negatives. Est. review ${money(impact)}/day spend.`;
   } else if (rec.action_type === "REVIEW_CAMPAIGN") {
     line += `${rec.reason}. Est. review ${money(impact)}/day spend.`;
-  } else if (rec.action_type === "LOWER_BUDGET" || rec.action_type === "DECREASE_BUDGET") {
-    line += `${rec.reason}. :hourglass_flowing_sand: Est. save ${money(impact)}/day.`;
+  } else if (
+    rec.action_type === "LOWER_BUDGET" ||
+    rec.action_type === "DECREASE_BUDGET"
+  ) {
+    line += `${rec.reason}. :hourglass_flowing_sand: Est. save ${money(
+      impact
+    )}/day.`;
   } else if (rec.action_type === "RAISE_BUDGET") {
     line += `${rec.reason}. :hourglass_flowing_sand: Est. +${money(impact)}/day cv.`;
   } else if (rec.action_type === "ADD_NEGATIVES") {
@@ -202,12 +215,18 @@ function buildMarketSection({ title, cc, campaigns, recommendations, date }) {
 
   lines.push(`${title} totals — ${money(totals.cost)} cost, ${totals.active_count} active campaigns`);
   lines.push(
-    `• SEM: ${money(sem.cost)} → ${money(sem.conversion_value)} cv, ROAS ${roas(sem.roas)} ` +
-      `(range ${roas(sem.min_roas)}–${roas(sem.max_roas)}, ${sem.below_count} camps below ≥10x threshold)`
+    `• SEM: ${money(sem.cost)} → ${money(sem.conversion_value)} cv, ROAS ${roas(
+      sem.roas
+    )} (range ${roas(sem.min_roas)}–${roas(sem.max_roas)}, ${
+      sem.below_count
+    } camps below ≥10x threshold)`
   );
   lines.push(
-    `• DG:  ${money(dg.cost)} → ${money(dg.conversion_value)} cv, ROAS ${roas(dg.roas)} ` +
-      `(range ${roas(dg.min_roas)}–${roas(dg.max_roas)}, ${dg.below_count} camps below ≥20x threshold)`
+    `• DG:  ${money(dg.cost)} → ${money(dg.conversion_value)} cv, ROAS ${roas(
+      dg.roas
+    )} (range ${roas(dg.min_roas)}–${roas(dg.max_roas)}, ${
+      dg.below_count
+    } camps below ≥20x threshold)`
   );
   lines.push("");
 
@@ -220,7 +239,11 @@ function buildMarketSection({ title, cc, campaigns, recommendations, date }) {
     lines.push("No recommendations for this market.");
   } else {
     recommendations
-      .sort((a, b) => Number(b.estimated_daily_impact || 0) - Number(a.estimated_daily_impact || 0))
+      .sort(
+        (a, b) =>
+          Number(b.estimated_daily_impact || 0) -
+          Number(a.estimated_daily_impact || 0)
+      )
       .forEach((rec, i) => {
         lines.push(formatRecommendation(rec, i + 1));
       });
@@ -232,7 +255,7 @@ function buildMarketSection({ title, cc, campaigns, recommendations, date }) {
   return lines.join("\n");
 }
 
-async function buildLatestReport() {
+async function buildLatestReports() {
   const client = new Client({
     connectionString: process.env.DATABASE_URL,
   });
@@ -278,35 +301,27 @@ async function buildLatestReport() {
     const snapshot = snapshotResult.rows[0].payload;
     const campaigns = snapshot.campaigns || [];
 
-    const mainCampaigns = campaigns.filter((c) => classifyMarket(c.campaign_name || c.campaign_key) === "main");
-    const secondaryCampaigns = campaigns.filter((c) => classifyMarket(c.campaign_name || c.campaign_key) === "secondary");
+    const mainCampaigns = campaigns.filter(
+      (c) => classifyMarket(c.campaign_name || c.campaign_key) === "main"
+    );
+    const secondaryCampaigns = campaigns.filter(
+      (c) => classifyMarket(c.campaign_name || c.campaign_key) === "secondary"
+    );
 
     const recs = recommendationResult.rows;
-    const mainRecs = recs.filter(isMainRecommendation);
-    const secondaryRecs = recs.filter(isSecondaryRecommendation);
+    const mainRecs = recs.filter(
+      (rec) => classifyMarket(rec.campaign_key || "") === "main"
+    );
+    const secondaryRecs = recs.filter(
+      (rec) => classifyMarket(rec.campaign_key || "") === "secondary"
+    );
 
     const date =
       alert.id.match(/\d{4}-\d{2}-\d{2}/)?.[0] ||
       snapshot.date ||
       String(alert.alert_date).slice(0, 10);
 
-    const totalCost = Number(snapshot.account_totals?.cost || 0);
-    const totalCv = Number(snapshot.account_totals?.conversion_value || 0);
-    const totalRoas = totalCost > 0 ? totalCv / totalCost : 0;
-
-    const header = [
-      `*Google Ads Daily Report*`,
-      `Alert ID: \`${alert.id}\``,
-      `Account: ${snapshot.account_name || snapshot.account_id || alert.account_id || "-"}`,
-      `Overall: ${money(totalCost)} cost → ${money(totalCv)} cv, ROAS ${roas(totalRoas)}`,
-      "",
-      alert.raw_report_text ? `_${alert.raw_report_text}_` : "",
-      "",
-    ]
-      .filter(Boolean)
-      .join("\n");
-
-    const mainSection = buildMarketSection({
+    const mainReport = buildMarketSection({
       title: "MAIN MARKET",
       cc: "@Habibie",
       campaigns: mainCampaigns,
@@ -314,7 +329,7 @@ async function buildLatestReport() {
       date,
     });
 
-    const secondarySection = buildMarketSection({
+    const secondaryReport = buildMarketSection({
       title: "SECONDARY MARKET",
       cc: "@Desvantyo",
       campaigns: secondaryCampaigns,
@@ -322,7 +337,10 @@ async function buildLatestReport() {
       date,
     });
 
-    return `${header}\n\n${mainSection}\n\n${secondarySection}`;
+    return {
+      mainReport,
+      secondaryReport,
+    };
   } finally {
     await client.end();
   }
@@ -354,14 +372,19 @@ async function sendToSlack(text) {
 }
 
 async function main() {
-  const report = await buildLatestReport();
+  const { mainReport, secondaryReport } = await buildLatestReports();
 
-  console.log("Report preview:");
+  console.log("Main Market report preview:");
   console.log("----------------------------------------");
-  console.log(report);
+  console.log(mainReport);
   console.log("----------------------------------------");
+  await sendToSlack(mainReport);
 
-  await sendToSlack(report);
+  console.log("Secondary Market report preview:");
+  console.log("----------------------------------------");
+  console.log(secondaryReport);
+  console.log("----------------------------------------");
+  await sendToSlack(secondaryReport);
 }
 
 main().catch((error) => {
