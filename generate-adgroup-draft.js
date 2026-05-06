@@ -86,7 +86,7 @@ async function saveError(client, id, message) {
   );
 }
 
-function formatDraftForConsole(request, draft) {
+function formatDraftForSlack(request, draft) {
   const adGroups = draft.ad_groups || [];
   const firstAdGroup = adGroups[0] || {};
   const keywords = firstAdGroup.keywords || [];
@@ -96,8 +96,7 @@ function formatDraftForConsole(request, draft) {
 
   const lines = [];
 
-  lines.push("");
-  lines.push("AD GROUP DRAFT");
+  lines.push(":memo: *AD GROUP DRAFT*");
   lines.push("========================================");
   lines.push(`Request ID: ${request.id}`);
   lines.push("");
@@ -107,7 +106,7 @@ function formatDraftForConsole(request, draft) {
   lines.push(`Budget note: ${draft.budget_note || "Ad group uses existing campaign budget."}`);
   lines.push("");
 
-  lines.push("Keywords:");
+  lines.push("*Keywords*");
   if (keywords.length === 0) {
     lines.push("- No keywords generated.");
   } else {
@@ -117,7 +116,7 @@ function formatDraftForConsole(request, draft) {
   }
 
   lines.push("");
-  lines.push("Negative keywords:");
+  lines.push("*Negative keywords*");
   if (negatives.length === 0) {
     lines.push("- No negatives generated.");
   } else {
@@ -127,14 +126,14 @@ function formatDraftForConsole(request, draft) {
   }
 
   lines.push("");
-  lines.push("Responsive Search Ad draft:");
+  lines.push("*Responsive Search Ad draft*");
   lines.push("Headlines:");
   (firstAd.headlines || []).slice(0, 12).forEach((h) => lines.push(`- ${h}`));
   lines.push("Descriptions:");
   (firstAd.descriptions || []).slice(0, 4).forEach((d) => lines.push(`- ${d}`));
 
   lines.push("");
-  lines.push("Status: Draft only. Not created in Google Ads yet.");
+  lines.push("*Status:* Draft only. Not created in Google Ads yet.");
   lines.push("========================================");
 
   return lines.join("\n");
@@ -223,6 +222,30 @@ Required JSON shape:
   };
 }
 
+
+async function sendDraftToSlack(text) {
+  if (!process.env.SLACK_WEBHOOK_URL) {
+    console.log("SLACK_WEBHOOK_URL missing. Skipping Slack send.");
+    return;
+  }
+
+  const response = await fetch(process.env.SLACK_WEBHOOK_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ text }),
+  });
+
+  const body = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`Slack webhook failed: ${response.status} ${body}`);
+  }
+
+  console.log("Draft sent to Slack.");
+}
+
 async function main() {
   const client = new Client({
     connectionString: process.env.DATABASE_URL,
@@ -246,7 +269,11 @@ async function main() {
 
         await saveDraft(client, request.id, parsed, draft);
 
-        console.log(formatDraftForConsole(request, draft));
+        const draftText = formatDraftForSlack(request, draft);
+
+        console.log(draftText);
+        await sendDraftToSlack(draftText);
+
         console.log(`Draft generated for ${request.id}`);
       } catch (error) {
         console.error(`Failed for ${request.id}: ${error.message}`);
