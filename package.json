@@ -16,7 +16,8 @@
     "@slack/web-api": "^7.15.2",
     "dotenv": "^17.4.2",
     "google-ads-api": "^23.0.0",
-    "pg": "^8.20.0"
+    "pg": "^8.20.0",
+    "pptxgenjs": "^4.0.1"
   },
   "devDependencies": {
     "wrangler": "^4.87.0"
