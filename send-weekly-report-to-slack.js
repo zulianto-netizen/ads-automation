@@ -122,12 +122,13 @@ function finishTotals(t) {
 
 function aggregateByMarketAndType(snapshots, market, type) {
   const totals = emptyTotals();
-  const campaignMap = new Map();
+  const adGroupMap = new Map();
   const wasteTerms = new Map();
 
   for (const snap of snapshots) {
     const payload = snap.payload || {};
 
+    // Segment totals still come from campaign rows.
     for (const campaign of payload.campaigns || []) {
       const campaignName = campaign.campaign_name || campaign.campaign_key || "";
       if (campaignName.toLowerCase().includes("branding")) continue;
@@ -135,16 +136,36 @@ function aggregateByMarketAndType(snapshots, market, type) {
       if (classifyType(campaignName) !== type) continue;
 
       addMetrics(totals, campaign);
-
-      if (!campaignMap.has(campaignName)) {
-        campaignMap.set(campaignName, emptyTotals());
-      }
-
-      addMetrics(campaignMap.get(campaignName), campaign);
     }
 
+    // Key drivers come from ad group rows.
+    for (const adGroup of payload.ad_groups || []) {
+      const campaignName = adGroup.campaign_name || "";
+      const adGroupName = adGroup.ad_group_name || "";
+
+      if (campaignName.toLowerCase().includes("branding")) continue;
+      if (classifyMarket(campaignName) !== market) continue;
+      if (classifyType(campaignName) !== type) continue;
+      if (!adGroupName) continue;
+
+      const key = `${campaignName}|||${adGroupName}`;
+
+      if (!adGroupMap.has(key)) {
+        adGroupMap.set(key, {
+          campaign_name: campaignName,
+          ad_group_name: adGroupName,
+          ...emptyTotals(),
+        });
+      }
+
+      addMetrics(adGroupMap.get(key), adGroup);
+    }
+
+    // Search-term waste still supports decreasing drivers.
     for (const term of payload.search_terms || []) {
       const campaignName = term.campaign_name || "";
+      const adGroupName = term.ad_group_name || "";
+
       if (campaignName.toLowerCase().includes("branding")) continue;
       if (classifyMarket(campaignName) !== market) continue;
       if (classifyType(campaignName) !== type) continue;
@@ -156,10 +177,11 @@ function aggregateByMarketAndType(snapshots, market, type) {
       if (!searchTerm) continue;
       if (cost < 1 || conversions !== 0) continue;
 
-      const key = `${campaignName}|||${searchTerm}`;
+      const key = `${campaignName}|||${adGroupName}|||${searchTerm}`;
       if (!wasteTerms.has(key)) {
         wasteTerms.set(key, {
           campaign_name: campaignName,
+          ad_group_name: adGroupName,
           search_term: searchTerm,
           cost: 0,
           clicks: 0,
@@ -172,8 +194,8 @@ function aggregateByMarketAndType(snapshots, market, type) {
     }
   }
 
-  const campaigns = Array.from(campaignMap.entries()).map(([campaign_name, values]) => ({
-    campaign_name,
+  const adGroups = Array.from(adGroupMap.values()).map((values) => ({
+    ...values,
     ...finishTotals(values),
   }));
 
@@ -183,24 +205,33 @@ function aggregateByMarketAndType(snapshots, market, type) {
 
   return {
     totals: finishTotals(totals),
-    campaigns,
+    adGroups,
     waste,
   };
 }
 
-function compareCampaignDrivers(current, previous, type) {
-  const previousMap = new Map(previous.campaigns.map((c) => [c.campaign_name, c]));
+function compareAdGroupDrivers(current, previous) {
+  const previousMap = new Map(
+    previous.adGroups.map((ag) => [
+      `${ag.campaign_name}|||${ag.ad_group_name}`,
+      ag,
+    ])
+  );
+
   const rows = [];
 
-  for (const c of current.campaigns) {
-    const p = previousMap.get(c.campaign_name) || finishTotals(emptyTotals());
+  for (const currentAdGroup of current.adGroups) {
+    const key = `${currentAdGroup.campaign_name}|||${currentAdGroup.ad_group_name}`;
+    const previousAdGroup = previousMap.get(key) || finishTotals(emptyTotals());
 
     rows.push({
-      campaign_name: c.campaign_name,
-      current: c,
-      previous: p,
-      cv_delta: c.conversion_value - p.conversion_value,
-      roas_delta_pct: changePercent(c.roas, p.roas),
+      campaign_name: currentAdGroup.campaign_name,
+      ad_group_name: currentAdGroup.ad_group_name,
+      current: currentAdGroup,
+      previous: previousAdGroup,
+      cv_delta:
+        currentAdGroup.conversion_value - previousAdGroup.conversion_value,
+      roas_delta_pct: changePercent(currentAdGroup.roas, previousAdGroup.roas),
     });
   }
 
@@ -217,8 +248,48 @@ function compareCampaignDrivers(current, previous, type) {
   return { increasing, decreasing };
 }
 
+function shortAdGroupName(name = "") {
+  const raw = String(name).replace(/\s+/g, " ").trim();
+
+  const parts = raw
+    .split("|")
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  const ignored = new Set([
+    "sem",
+    "dg",
+    "g2g",
+    "all user",
+    "all users",
+    "main market",
+    "secondary market",
+    "non-branded",
+    "branded",
+    "global",
+  ]);
+
+  const useful = parts.filter((p) => {
+    const lower = p.toLowerCase();
+    if (ignored.has(lower)) return false;
+    if (/^\d+$/.test(lower)) return false;
+    return true;
+  });
+
+  if (useful.length >= 2) {
+    return useful.slice(-2).join(" ");
+  }
+
+  if (useful.length === 1) {
+    return useful[0];
+  }
+
+  return raw.slice(0, 40);
+}
+
 function driverLine(row, threshold) {
-  const name = shortCampaignName(row.campaign_name);
+  const adGroupName = shortAdGroupName(row.ad_group_name);
+  const campaignName = shortCampaignName(row.campaign_name);
   const currentRoas = row.current.roas;
   const previousRoas = row.previous.roas;
 
@@ -228,20 +299,21 @@ function driverLine(row, threshold) {
       : `below ${threshold}x threshold`;
 
   if (row.previous.cost > 0) {
-    return `    * ${name.padEnd(20)} — ROAS ${roas(previousRoas)} → ${roas(currentRoas)}  (${signedPct(changePercent(currentRoas, previousRoas))})  ← ${thresholdText}`;
+    return `    * ${adGroupName.padEnd(24)} — ROAS ${roas(previousRoas)} → ${roas(currentRoas)}  (${signedPct(changePercent(currentRoas, previousRoas))}) in ${campaignName} ← ${thresholdText}`;
   }
 
-  return `    * ${name.padEnd(20)} — ROAS ${roas(currentRoas)}  (${thresholdText})`;
+  return `    * ${adGroupName.padEnd(24)} — ROAS ${roas(currentRoas)} in ${campaignName} (${thresholdText})`;
 }
 
 function wasteLine(item) {
-  return `    * ${shortCampaignName(item.campaign_name).padEnd(20)} — ${money2(item.cost)}/wk wasted on "${item.search_term}"`;
+  const ag = item.ad_group_name ? `${shortAdGroupName(item.ad_group_name)} / ` : "";
+  return `    * ${ag}${shortCampaignName(item.campaign_name)} — ${money2(item.cost)}/wk wasted on "${item.search_term}"`;
 }
 
 function formatSegmentBlock({ marketTitle, type, current, previous, dateLabel, threshold }) {
   const currentTotals = current.totals;
   const previousTotals = previous.totals;
-  const drivers = compareCampaignDrivers(current, previous, type);
+  const drivers = compareAdGroupDrivers(current, previous);
 
   const lines = [];
 
@@ -414,8 +486,8 @@ async function main() {
 
     const snapshots = await fetchSnapshots(client);
 
-    if (snapshots.length < 2) {
-      throw new Error("Need at least 2 daily snapshots for weekly comparison.");
+    if (snapshots.length < 1) {
+      throw new Error("Need at least 1 daily snapshot for weekly report.");
     }
 
     const splitIndex = Math.max(0, snapshots.length - 7);
@@ -423,7 +495,7 @@ async function main() {
     const currentSnapshots = snapshots.slice(splitIndex);
 
     if (previousSnapshots.length === 0) {
-      console.log("Warning: previous period has no data yet. Some comparisons will show from $0/0.");
+      console.log("Warning: previous period has no data yet. This is a first-week baseline report.");
     }
 
     const report = formatWeeklyReport({
