@@ -168,87 +168,137 @@ async function handleSlackCommand(request, env) {
 }
 
 
+
+async function postSlackMessage(env, channel, threadTs, text) {
+  if (!env.SLACK_BOT_TOKEN || !channel) {
+    return false;
+  }
+
+  const response = await fetch("https://slack.com/api/chat.postMessage", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
+      "Content-Type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify({
+      channel,
+      thread_ts: threadTs || undefined,
+      text,
+    }),
+  });
+
+  const data = await response.json();
+
+  if (!data.ok) {
+    console.error("chat.postMessage failed:", data.error);
+    return false;
+  }
+
+  return true;
+}
+
 async function handleSlackInteraction(request, env) {
   const rawBody = await request.text();
+  let responseUrl = null;
+  let channelId = null;
+  let threadTs = null;
 
-  const isValid = await verifySlackRequest(request, rawBody, env);
+  try {
+    const isValid = await verifySlackRequest(request, rawBody, env);
 
-  if (!isValid) {
-    return textResponse("Invalid Slack signature.", 401);
-  }
+    if (!isValid) {
+      return textResponse("Invalid Slack signature.", 401);
+    }
 
-  const params = new URLSearchParams(rawBody);
-  const payloadText = params.get("payload");
+    const params = new URLSearchParams(rawBody);
+    const payloadText = params.get("payload");
 
-  if (!payloadText) {
-    return textResponse("Missing Slack interaction payload.", 400);
-  }
+    if (!payloadText) {
+      return textResponse("Missing Slack interaction payload.", 400);
+    }
 
-  const payload = JSON.parse(payloadText);
-  const action = payload.actions && payload.actions[0];
+    const payload = JSON.parse(payloadText);
+    responseUrl = payload.response_url;
+    channelId = payload.channel && payload.channel.id;
+    threadTs =
+      (payload.message && (payload.message.thread_ts || payload.message.ts)) ||
+      (payload.container && payload.container.message_ts) ||
+      null;
 
-  if (!action) {
-    return textResponse("No Slack action found.", 400);
-  }
+    const action = payload.actions && payload.actions[0];
 
-  const actionValue = JSON.parse(action.value || "{}");
+    if (!action) {
+      return textResponse("No Slack action found.", 400);
+    }
 
-  const clickedAction = actionValue.action || action.action_id;
-  const recommendationId = actionValue.recommendation_id || null;
-  const alertId = actionValue.alert_id || null;
-  const recommendationNumber = actionValue.recommendation_number || null;
+    let actionValue = {};
 
-  const sql = neon(env.DATABASE_URL);
+    try {
+      actionValue = JSON.parse(action.value || "{}");
+    } catch (error) {
+      actionValue = {};
+    }
 
-  let newStatus = null;
+    const clickedAction = actionValue.action || action.action_id;
+    const recommendationId = actionValue.recommendation_id || null;
+    const alertId = actionValue.alert_id || null;
+    const recommendationNumber = actionValue.recommendation_number || null;
 
-  if (clickedAction === "approve") {
-    newStatus = "approved";
-  }
+    const sql = neon(env.DATABASE_URL);
 
-  if (clickedAction === "decline") {
-    newStatus = "declined";
-  }
+    let responseText = "";
 
-  if (newStatus && recommendationId) {
-    await sql`
-      UPDATE recommendations
-      SET status = ${newStatus}
-      WHERE id = ${recommendationId}
-    `;
-  } else if (newStatus && alertId && recommendationNumber) {
-    await sql`
-      UPDATE recommendations
-      SET status = ${newStatus}
-      WHERE alert_id = ${alertId}
-        AND recommendation_number = ${recommendationNumber}
-    `;
-  }
-
-  if (clickedAction === "details") {
-    return jsonResponse({
-      response_type: "ephemeral",
-      text:
+    if (clickedAction === "details") {
+      responseText =
         `Details requested for recommendation #${recommendationNumber || "unknown"}.\n` +
         `Alert: ${alertId || "unknown"}\n\n` +
-        `Details view will be expanded in the next version.`,
-    });
-  }
+        `Detailed preview will be expanded in the next version.`;
+    } else if (clickedAction === "approve" || clickedAction === "decline") {
+      const newStatus = clickedAction === "approve" ? "approved" : "declined";
 
-  if (newStatus) {
-    return jsonResponse({
-      response_type: "ephemeral",
-      text:
+      if (recommendationId) {
+        await sql`
+          UPDATE recommendations
+          SET status = ${newStatus}
+          WHERE id = ${recommendationId}
+        `;
+      } else if (alertId && recommendationNumber) {
+        await sql`
+          UPDATE recommendations
+          SET status = ${newStatus}
+          WHERE alert_id = ${alertId}
+            AND recommendation_number = ${recommendationNumber}
+        `;
+      }
+
+      responseText =
         `${newStatus === "approved" ? "Approved" : "Declined"} recommendation ` +
         `#${recommendationNumber || recommendationId || "unknown"}.\n\n` +
-        `Status saved to Neon. Dry-run/apply confirmation will come from the next step.`,
-    });
-  }
+        `Status saved to Neon. Dry-run/apply confirmation will come from the next step.`;
+    } else {
+      responseText = `Unknown button action: ${clickedAction}`;
+    }
 
-  return jsonResponse({
-    response_type: "ephemeral",
-    text: `Unknown button action: ${clickedAction}`,
-  });
+    const posted = await postSlackMessage(env, channelId, threadTs, responseText);
+
+    if (!posted && responseUrl) {
+      await respondToSlackInteraction(responseUrl, responseText);
+    }
+
+    return textResponse("");
+  } catch (error) {
+    console.error("Slack interaction failed:", error.message);
+
+    const errorText = `Button action failed: ${error.message}`;
+
+    const posted = await postSlackMessage(env, channelId, threadTs, errorText);
+
+    if (!posted && responseUrl) {
+      await respondToSlackInteraction(responseUrl, errorText);
+    }
+
+    return textResponse("");
+  }
 }
 
 export default {

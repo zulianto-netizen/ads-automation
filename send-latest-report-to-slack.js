@@ -227,7 +227,23 @@ function formatRecommendation(rec, index) {
   }
 
   if (action === "PAUSE_KEYWORD") {
-    return `${tag} ${metricText} — pause keyword. Est. avoid ${money(impact)}/day.`;
+    const keyword =
+      rec.keyword_text ||
+      rec.proposed_value?.keyword ||
+      rec.proposed_value?.keyword_text ||
+      rec.current_value?.keyword_text ||
+      "";
+
+    const matchType =
+      rec.current_value?.match_type ||
+      rec.proposed_value?.match_type ||
+      "";
+
+    const keywordText = keyword
+      ? `"${keyword}"${matchType ? ` ${matchType}` : ""} — `
+      : "";
+
+    return `${tag} ${keywordText}${metricText} — pause keyword. Est. avoid ${money(impact)}/day.`;
   }
 
   return `${tag} ${metricText} — ${action}. Est. impact ${money(impact)}/day.`;
@@ -373,6 +389,8 @@ async function buildLatestReports() {
     return {
       mainReport,
       secondaryReport,
+      mainRecs,
+      secondaryRecs,
     };
   } finally {
     await client.end();
@@ -404,20 +422,144 @@ async function sendToSlack(text) {
   console.log(body);
 }
 
+
+async function slackApi(method, body) {
+  if (!process.env.SLACK_BOT_TOKEN) {
+    throw new Error("SLACK_BOT_TOKEN is missing.");
+  }
+
+  const response = await fetch(`https://slack.com/api/${method}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}`,
+      "Content-Type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify(body),
+  });
+
+  const data = await response.json();
+
+  if (!data.ok) {
+    throw new Error(`${method} failed: ${data.error}`);
+  }
+
+  return data;
+}
+
+function buttonValue(action, rec) {
+  return JSON.stringify({
+    action,
+    recommendation_id: rec.id,
+    alert_id: rec.alert_id,
+    recommendation_number: rec.recommendation_number,
+  });
+}
+
+function buttonLabel(action, rec) {
+  if (action === "approve") {
+    if (rec.action_type === "ADD_NEGATIVES") return "Approve negatives";
+    if (rec.action_type === "ADD_KEYWORD") return "Approve keyword";
+    if (rec.action_type === "PAUSE_KEYWORD") return "Approve pause";
+    if (rec.action_type === "RAISE_BUDGET") return "Approve budget";
+    if (rec.action_type === "DECREASE_BUDGET") return "Approve budget";
+    return "Approve";
+  }
+
+  if (action === "decline") return "Decline";
+  if (action === "details") return "Details";
+
+  return action;
+}
+
+function recommendationBlocks(recommendations) {
+  const blocks = [];
+
+  for (const rec of recommendations.slice(0, 8)) {
+    blocks.push({
+      type: "actions",
+      block_id: `rec_${rec.recommendation_number}`,
+      elements: [
+        {
+          type: "button",
+          text: {
+            type: "plain_text",
+            text: buttonLabel("approve", rec),
+          },
+          style: "primary",
+          action_id: "approve",
+          value: buttonValue("approve", rec),
+        },
+        {
+          type: "button",
+          text: {
+            type: "plain_text",
+            text: buttonLabel("decline", rec),
+          },
+          style: "danger",
+          action_id: "decline",
+          value: buttonValue("decline", rec),
+        },
+        {
+          type: "button",
+          text: {
+            type: "plain_text",
+            text: buttonLabel("details", rec),
+          },
+          action_id: "details",
+          value: buttonValue("details", rec),
+        },
+      ],
+    });
+  }
+
+  return blocks;
+}
+
+async function sendSlackMessageWithButtons(text, recommendations) {
+  if (!process.env.SLACK_CHANNEL_ID) {
+    throw new Error("SLACK_CHANNEL_ID is missing.");
+  }
+
+  const blocks = [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text,
+      },
+    },
+    ...recommendationBlocks(recommendations || []),
+  ];
+
+  const result = await slackApi("chat.postMessage", {
+    channel: process.env.SLACK_CHANNEL_ID,
+    text,
+    blocks,
+    unfurl_links: false,
+    unfurl_media: false,
+  });
+
+  console.log("Slack report with buttons sent successfully.");
+  console.log(result.ts);
+
+  return result;
+}
+
 async function main() {
-  const { mainReport, secondaryReport } = await buildLatestReports();
+  const { mainReport, secondaryReport, mainRecs, secondaryRecs } =
+    await buildLatestReports();
 
   console.log("Main Market report preview:");
   console.log("----------------------------------------");
   console.log(mainReport);
   console.log("----------------------------------------");
-  await sendToSlack(mainReport);
+  await sendSlackMessageWithButtons(mainReport, mainRecs);
 
   console.log("Secondary Market report preview:");
   console.log("----------------------------------------");
   console.log(secondaryReport);
   console.log("----------------------------------------");
-  await sendToSlack(secondaryReport);
+  await sendSlackMessageWithButtons(secondaryReport, secondaryRecs);
 }
 
 main().catch((error) => {
