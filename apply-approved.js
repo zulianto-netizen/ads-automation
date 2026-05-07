@@ -1,44 +1,92 @@
 require("dotenv").config({ override: true });
+
 const { Client } = require("pg");
+const { normalizeRecommendation } = require("./normalize-recommendations");
 
-function printDryRun(rec) {
-  console.log("----------------------------------------");
-  console.log(`Recommendation ${rec.recommendation_number}`);
-  console.log(`Action: ${rec.action_type}`);
-  console.log(`Campaign: ${rec.campaign_key || "-"}`);
-  console.log(`Ad group: ${rec.ad_group_key || "-"}`);
-  console.log(`Keyword: ${rec.keyword_text || "-"}`);
-  console.log(`Reason: ${rec.reason}`);
+function money(value) {
+  return `$${Number(value || 0).toFixed(2)}`;
+}
 
-  if (rec.action_type === "INVESTIGATE_TRACKING") {
-    console.log("DRY RUN: Would create a tracking investigation task.");
-    console.log(`Task: ${rec.proposed_value.task || "Check tracking setup"}`);
-    return;
+function formatApplyPreview(rec) {
+  const normalized = normalizeRecommendation(rec);
+  const action = normalized.normalized_action;
+
+  const lines = [];
+
+  lines.push(`*DRY-RUN APPLY — #${rec.recommendation_number} ${action.action_type}*`);
+  lines.push(`Campaign: ${action.campaign_key || "unknown"}`);
+
+  if (action.ad_group_key) {
+    lines.push(`Ad group: ${action.ad_group_key}`);
   }
 
-  if (rec.action_type === "RAISE_BUDGET") {
-    console.log(
-      `DRY RUN: Would raise budget from $${rec.current_value.budget} to $${rec.proposed_value.budget}`
-    );
-    return;
+  if (action.action_type === "ADD_NEGATIVES") {
+    lines.push("");
+    lines.push("*Would add negative keywords:*");
+
+    if (!action.negative_keywords || action.negative_keywords.length === 0) {
+      lines.push("• No negative keywords found.");
+    } else {
+      action.negative_keywords.forEach((kw) => {
+        lines.push(`• "${kw}" (${action.match_type || "phrase"})`);
+      });
+    }
+
+    lines.push(`Apply level: ${action.apply_level || "campaign"}`);
+    lines.push(`Estimated avoided waste: ${money(action.estimated_daily_impact)}/day`);
+  } else if (action.action_type === "ADD_KEYWORD") {
+    lines.push("");
+    lines.push("*Would add keyword:*");
+    lines.push(`• "${action.keyword_text || "unknown"}" (${action.match_type || "exact"})`);
+
+    if (action.final_url) {
+      lines.push(`Final URL: ${action.final_url}`);
+    }
+
+    lines.push(`Estimated conversion value upside: ${money(action.estimated_daily_impact)}/day`);
+  } else if (action.action_type === "PAUSE_KEYWORD") {
+    lines.push("");
+    lines.push("*Would pause keyword:*");
+    lines.push(`• "${action.keyword_text || "unknown"}"${action.match_type ? ` (${action.match_type})` : ""}`);
+
+    if (action.keyword_id) {
+      lines.push(`Keyword ID: ${action.keyword_id}`);
+    }
+
+    lines.push(`Estimated avoided waste: ${money(action.estimated_daily_impact)}/day`);
+  } else {
+    lines.push("");
+    lines.push(`No dry-run handler yet for action type: ${action.action_type}`);
   }
 
-  if (rec.action_type === "ADD_NEGATIVES") {
-    console.log(
-      `DRY RUN: Would add negative keywords: ${rec.proposed_value.negative_keywords.join(", ")}`
-    );
-    console.log(`Match type: ${rec.proposed_value.match_type}`);
-    return;
+  lines.push("");
+  lines.push("*Result:* No Google Ads changes made. This is dry-run only.");
+
+  return lines.join("\n");
+}
+
+async function slackApi(method, body) {
+  if (!process.env.SLACK_BOT_TOKEN || !process.env.SLACK_CHANNEL_ID) {
+    console.log("Slack token/channel missing. Skipping Slack confirmation.");
+    return null;
   }
 
-  if (rec.action_type === "PAUSE_KEYWORD") {
-    console.log(
-      `DRY RUN: Would pause keyword "${rec.keyword_text}" because it spent $${rec.current_value.spend} with ${rec.current_value.conversions} conversions`
-    );
-    return;
+  const response = await fetch(`https://slack.com/api/${method}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}`,
+      "Content-Type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify(body),
+  });
+
+  const data = await response.json();
+
+  if (!data.ok) {
+    throw new Error(`${method} failed: ${data.error}`);
   }
 
-  console.log(`DRY RUN: Would apply action type ${rec.action_type}`);
+  return data;
 }
 
 async function main() {
@@ -49,87 +97,52 @@ async function main() {
   try {
     await client.connect();
 
-    const result = await client.query(
-      `
-      SELECT
-        id,
-        recommendation_number,
-        action_type,
-        campaign_key,
-        ad_group_key,
-        keyword_text,
-        current_value,
-        proposed_value,
-        reason,
-        status
+    const result = await client.query(`
+      SELECT *
       FROM recommendations
       WHERE status = 'approved'
-      ORDER BY recommendation_number ASC;
-      `
-    );
+      ORDER BY created_at DESC, recommendation_number ASC
+      LIMIT 20;
+    `);
 
     if (result.rows.length === 0) {
-      console.log("No approved recommendations to apply.");
+      console.log("No approved recommendations found.");
       return;
     }
 
+    console.log("Approved recommendations dry-run apply");
+    console.log("========================================");
+
+    const previews = [];
+
     for (const rec of result.rows) {
-      printDryRun(rec);
+      const preview = formatApplyPreview(rec);
+      previews.push(preview);
 
-      const appliedChangeId = `change_${rec.id}`;
-
-      await client.query(
-        `
-        INSERT INTO applied_changes (
-          id,
-          recommendation_id,
-          change_type,
-          entity_type,
-          campaign_key,
-          ad_group_key,
-          keyword_text,
-          before_value,
-          after_value,
-          status
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        ON CONFLICT (id) DO UPDATE SET
-          before_value = EXCLUDED.before_value,
-          after_value = EXCLUDED.after_value,
-          status = EXCLUDED.status;
-        `,
-        [
-          appliedChangeId,
-          rec.id,
-          rec.action_type,
-          rec.action_type === "INVESTIGATE_TRACKING" ? "account" : "campaign",
-          rec.campaign_key || null,
-          rec.ad_group_key || null,
-          rec.keyword_text || null,
-          JSON.stringify(rec.current_value || {}),
-          JSON.stringify(rec.proposed_value || {}),
-          "dry_run_applied",
-        ]
-      );
-
-      await client.query(
-        `
-        UPDATE recommendations
-        SET status = 'dry_run_applied'
-        WHERE id = $1;
-        `,
-        [rec.id]
-      );
-
-      console.log("Applied change recorded in applied_changes.");
-      console.log("Status updated to dry_run_applied.");
+      console.log("");
+      console.log(preview);
+      console.log("----------------------------------------");
     }
-  } catch (error) {
-    console.error("Apply failed:");
-    console.error(error.message);
+
+    const slackText =
+      `:white_check_mark: *Approved recommendations dry-run apply*\n\n` +
+      previews.join("\n\n────────────────────\n\n");
+
+    await slackApi("chat.postMessage", {
+      channel: process.env.SLACK_CHANNEL_ID,
+      text: slackText,
+      unfurl_links: false,
+      unfurl_media: false,
+    });
+
+    console.log("Dry-run apply preview completed.");
   } finally {
     await client.end();
   }
 }
 
-main();
+main().catch((error) => {
+  console.error("Failed to apply approved recommendations:");
+  console.error(error.message);
+  process.exit(1);
+});
