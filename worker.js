@@ -197,6 +197,187 @@ async function postSlackMessage(env, channel, threadTs, text) {
   return true;
 }
 
+
+function money(value) {
+  return `$${Number(value || 0).toFixed(2)}`;
+}
+
+function normalizeMatchType(value, fallback = "phrase") {
+  const raw = String(value || fallback).toLowerCase();
+
+  if (raw.includes("exact")) return "exact";
+  if (raw.includes("phrase")) return "phrase";
+  if (raw.includes("broad")) return "broad";
+
+  return fallback;
+}
+
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined) continue;
+    if (typeof value === "string" && value.trim() === "") continue;
+    return value;
+  }
+  return null;
+}
+
+function normalizeWorkerRecommendation(rec) {
+  const proposed = rec.proposed_value || {};
+  const current = rec.current_value || {};
+  const actionType = rec.action_type;
+
+  const action = {
+    action_type: actionType,
+    campaign_key: rec.campaign_key || null,
+    ad_group_key:
+      rec.ad_group_key ||
+      current.ad_group_name ||
+      proposed.ad_group_name ||
+      null,
+    estimated_daily_impact: Number(rec.estimated_daily_impact || 0),
+  };
+
+  if (actionType === "ADD_NEGATIVES") {
+    const negativeKeywords =
+      proposed.negative_keywords ||
+      proposed.keywords ||
+      proposed.terms ||
+      [];
+
+    return {
+      ...action,
+      negative_keywords: Array.isArray(negativeKeywords)
+        ? negativeKeywords.map(String).filter(Boolean)
+        : [],
+      match_type: normalizeMatchType(proposed.match_type, "phrase"),
+      apply_level: proposed.apply_level || "campaign",
+    };
+  }
+
+  if (actionType === "ADD_KEYWORD") {
+    const keyword = firstNonEmpty(
+      proposed.keyword,
+      proposed.keyword_text,
+      Array.isArray(proposed.keywords) ? proposed.keywords[0] : null,
+      Array.isArray(proposed.new_keywords) ? proposed.new_keywords[0] : null,
+      rec.keyword_text
+    );
+
+    return {
+      ...action,
+      keyword_text: keyword,
+      match_type: "exact",
+      final_url: proposed.final_url || proposed.landing_page || null,
+    };
+  }
+
+  if (actionType === "PAUSE_KEYWORD") {
+    const keyword = firstNonEmpty(
+      rec.keyword_text,
+      current.keyword_text,
+      proposed.keyword_text,
+      proposed.keyword
+    );
+
+    return {
+      ...action,
+      keyword_id: current.keyword_id || proposed.keyword_id || null,
+      keyword_text: keyword,
+      match_type: normalizeMatchType(current.match_type || proposed.match_type, ""),
+      new_status: "paused",
+    };
+  }
+
+  return action;
+}
+
+function formatWorkerDryRun(rec) {
+  const action = normalizeWorkerRecommendation(rec);
+  const lines = [];
+
+  lines.push(`*#${rec.recommendation_number} ${action.action_type}*`);
+  lines.push(`Campaign: ${action.campaign_key || "unknown"}`);
+
+  if (action.ad_group_key) {
+    lines.push(`Ad group: ${action.ad_group_key}`);
+  }
+
+  if (action.action_type === "ADD_NEGATIVES") {
+    lines.push("");
+    lines.push("*Would add negative keywords:*");
+
+    if ((action.negative_keywords || []).length === 0) {
+      lines.push("• No negative keywords found in recommendation payload.");
+    } else {
+      for (const kw of action.negative_keywords || []) {
+        lines.push(`• "${kw}" (${action.match_type})`);
+      }
+    }
+
+    lines.push(`Apply level: ${action.apply_level}`);
+    lines.push(`Est. avoid ${money(action.estimated_daily_impact)}/day`);
+  } else if (action.action_type === "ADD_KEYWORD") {
+    lines.push("");
+    lines.push("*Would add keyword:*");
+    lines.push(`• "${action.keyword_text || "unknown"}" (${action.match_type})`);
+
+    if (action.final_url) {
+      lines.push(`Final URL: ${action.final_url}`);
+    }
+
+    lines.push(`Est. +${money(action.estimated_daily_impact)}/day cv`);
+  } else if (action.action_type === "PAUSE_KEYWORD") {
+    lines.push("");
+    lines.push("*Would pause keyword:*");
+    lines.push(
+      `• "${action.keyword_text || "unknown"}"${
+        action.match_type ? ` (${action.match_type})` : ""
+      }`
+    );
+
+    if (action.keyword_id) {
+      lines.push(`Keyword ID: ${action.keyword_id}`);
+    }
+
+    lines.push(`Est. avoid ${money(action.estimated_daily_impact)}/day`);
+  } else {
+    lines.push("");
+    lines.push(`Dry-run preview available for ${action.action_type}.`);
+  }
+
+  lines.push("");
+  lines.push("*Status:* DRY RUN ONLY — no Google Ads changes made yet.");
+
+  return lines.join("\n");
+}
+
+async function getRecommendationForButton(sql, recommendationId, alertId, recommendationNumber) {
+  if (recommendationId) {
+    const rows = await sql`
+      SELECT *
+      FROM recommendations
+      WHERE id = ${recommendationId}
+      LIMIT 1
+    `;
+
+    if (rows.length > 0) return rows[0];
+  }
+
+  if (alertId && recommendationNumber) {
+    const rows = await sql`
+      SELECT *
+      FROM recommendations
+      WHERE alert_id = ${alertId}
+        AND recommendation_number = ${recommendationNumber}
+      LIMIT 1
+    `;
+
+    if (rows.length > 0) return rows[0];
+  }
+
+  return null;
+}
+
 async function handleSlackInteraction(request, env) {
   const rawBody = await request.text();
   let responseUrl = null;
