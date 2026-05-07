@@ -240,13 +240,57 @@ function formatRecommendation(rec, index) {
       "";
 
     const keywordText = keyword
-      ? `"${keyword}"${matchType ? ` ${matchType}` : ""} — `
+      ? `"${keyword}"${matchType ? ` ${matchType}` : ""}`
       : "";
+
+    const evidenceText = formatPauseKeywordEvidence(rec);
+
+    if (evidenceText) {
+      return `${tag} ${keywordText} — ${evidenceText} — pause keyword. Est. avoid ${money(impact)}/day.`;
+    }
 
     return `${tag} ${keywordText}${metricText} — pause keyword. Est. avoid ${money(impact)}/day.`;
   }
 
   return `${tag} ${metricText} — ${action}. Est. impact ${money(impact)}/day.`;
+}
+
+
+function formatPauseKeywordEvidence(rec) {
+  const current = rec.current_value || {};
+  const cost7d = current.cost_7d;
+  const clicks7d = current.clicks_7d;
+  const conversions7d = current.conversions_7d;
+
+  if (cost7d !== undefined || clicks7d !== undefined || conversions7d !== undefined) {
+    const parts = [];
+
+    if (cost7d !== undefined) {
+      parts.push(`7d $${Number(cost7d || 0).toFixed(2)} spend`);
+    }
+
+    if (clicks7d !== undefined) {
+      parts.push(`${Number(clicks7d || 0)} clicks`);
+    }
+
+    if (conversions7d !== undefined) {
+      parts.push(`${Number(conversions7d || 0)} conv`);
+    }
+
+    return parts.join(", ");
+  }
+
+  const cost = current.cost;
+  const clicks = current.clicks;
+  const conversions = current.conversions;
+
+  const parts = [];
+
+  if (cost !== undefined) parts.push(`$${Number(cost || 0).toFixed(2)} spend`);
+  if (clicks !== undefined) parts.push(`${Number(clicks || 0)} clicks`);
+  if (conversions !== undefined) parts.push(`${Number(conversions || 0)} conv`);
+
+  return parts.join(", ");
 }
 
 function buildMarketSection({ title, cc, campaigns, recommendations, date }) {
@@ -313,9 +357,14 @@ async function buildLatestReports() {
     await client.connect();
 
     const alertResult = await client.query(`
-      SELECT *
-      FROM alerts
-      ORDER BY created_at DESC
+      SELECT a.*
+      FROM alerts a
+      WHERE EXISTS (
+        SELECT 1
+        FROM recommendations r
+        WHERE r.alert_id = a.id
+      )
+      ORDER BY a.created_at DESC
       LIMIT 1;
     `);
 

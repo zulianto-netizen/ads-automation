@@ -47,6 +47,384 @@ async function getLatestSnapshot(client) {
   return result.rows[0];
 }
 
+
+
+function pickMetricFields(row) {
+  if (!row || typeof row !== "object") return row;
+
+  return {
+    campaign_id: row.campaign_id,
+    campaign_name: row.campaign_name || row.campaign_key,
+    ad_group_id: row.ad_group_id,
+    ad_group_name: row.ad_group_name,
+    keyword_id: row.keyword_id,
+    keyword_text: row.keyword_text,
+    match_type: row.match_type,
+    search_term: row.search_term,
+    status: row.status,
+    cost: row.cost,
+    impressions: row.impressions,
+    clicks: row.clicks,
+    conversions: row.conversions,
+    conversion_value: row.conversion_value,
+    roas: row.roas
+  };
+}
+
+function limitRowsForClaude(rows, limit, sortField = "cost") {
+  if (!Array.isArray(rows)) return [];
+
+  return [...rows]
+    .sort((a, b) => Number(b[sortField] || 0) - Number(a[sortField] || 0))
+    .slice(0, limit)
+    .map(pickMetricFields);
+}
+
+function compactCandidatesForClaude(rows, limit = 12) {
+  if (!Array.isArray(rows)) return [];
+
+  return rows.slice(0, limit).map((item) => {
+    if (!item || typeof item !== "object") return item;
+
+    const compact = pickMetricFields(item);
+
+    // Preserve common candidate fields without carrying huge nested objects.
+    compact.campaign_key = item.campaign_key || item.campaign_name;
+    compact.ad_group_key = item.ad_group_key || item.ad_group_name;
+    compact.keyword_text = item.keyword_text;
+    compact.search_term = item.search_term;
+    compact.wasted_spend = item.wasted_spend;
+    compact.estimated_daily_impact = item.estimated_daily_impact;
+    compact.reason = item.reason;
+
+    if (Array.isArray(item.keywords)) {
+      compact.keywords = item.keywords.slice(0, 6);
+    }
+
+    if (Array.isArray(item.terms)) {
+      compact.terms = item.terms.slice(0, 6);
+    }
+
+    if (Array.isArray(item.search_terms)) {
+      compact.search_terms = item.search_terms.slice(0, 6).map(pickMetricFields);
+    }
+
+    if (Array.isArray(item.items)) {
+      compact.items = item.items.slice(0, 6).map(pickMetricFields);
+    }
+
+    return compact;
+  });
+}
+
+function compactMetricsForClaude(metrics) {
+  return {
+    id: metrics.id,
+    source: metrics.source,
+    market: metrics.market,
+    account_id: metrics.account_id,
+    account_name: metrics.account_name,
+    date: metrics.date,
+
+    account_totals: metrics.account_totals,
+    account_totals_7d: metrics.account_totals_7d,
+    account_totals_30d: metrics.account_totals_30d,
+
+    // Smaller raw slices. Main recommendation logic should come from candidates below.
+    campaigns: limitRowsForClaude(metrics.campaigns, 40),
+    campaigns_7d: limitRowsForClaude(metrics.campaigns_7d, 50),
+    campaigns_30d: limitRowsForClaude(metrics.campaigns_30d, 50),
+
+    ad_groups: limitRowsForClaude(metrics.ad_groups, 40),
+    ad_groups_7d: limitRowsForClaude(metrics.ad_groups_7d, 60),
+    ad_groups_30d: limitRowsForClaude(metrics.ad_groups_30d, 60),
+
+    search_terms: limitRowsForClaude(metrics.search_terms, 40),
+    search_terms_7d: limitRowsForClaude(metrics.search_terms_7d, 70),
+    search_terms_30d: limitRowsForClaude(metrics.search_terms_30d, 70),
+
+    keywords: limitRowsForClaude(metrics.keywords, 50),
+    keywords_7d: limitRowsForClaude(metrics.keywords_7d, 70),
+    keywords_30d: limitRowsForClaude(metrics.keywords_30d, 70),
+
+    // Pre-built candidates, also compacted.
+    search_term_candidates: compactCandidatesForClaude(metrics.search_term_candidates, 12),
+    new_keyword_candidates: compactCandidatesForClaude(metrics.new_keyword_candidates, 12),
+    keyword_pause_candidates: compactCandidatesForClaude(metrics.keyword_pause_candidates, 12),
+    negative_keyword_candidates: compactCandidatesForClaude(metrics.negative_keyword_candidates, 12)
+  };
+}
+
+function normalizeTermForCompare(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function termTokens(value) {
+  return new Set(
+    normalizeTermForCompare(value)
+      .split(" ")
+      .filter((token) => token.length > 1)
+  );
+}
+
+function tokenOverlapRatio(a, b) {
+  const aTokens = termTokens(a);
+  const bTokens = termTokens(b);
+
+  if (aTokens.size === 0 || bTokens.size === 0) return 0;
+
+  let overlap = 0;
+  for (const token of aTokens) {
+    if (bTokens.has(token)) overlap++;
+  }
+
+  return overlap / Math.min(aTokens.size, bTokens.size);
+}
+
+function areCloseSearchTerms(a, b) {
+  const normalizedA = normalizeTermForCompare(a);
+  const normalizedB = normalizeTermForCompare(b);
+
+  if (!normalizedA || !normalizedB) return false;
+  if (normalizedA === normalizedB) return true;
+  if (normalizedA.includes(normalizedB) || normalizedB.includes(normalizedA)) {
+    return true;
+  }
+
+  return tokenOverlapRatio(normalizedA, normalizedB) >= 0.65;
+}
+
+function getKeywordOpportunityTerms(recommendations) {
+  const terms = [];
+
+  for (const rec of recommendations || []) {
+    if (rec.action_type !== "ADD_KEYWORD") continue;
+
+    const proposed = rec.proposed_value || {};
+
+    const candidates = [
+      rec.keyword_text,
+      proposed.keyword,
+      proposed.keyword_text,
+      ...(Array.isArray(proposed.keywords) ? proposed.keywords : []),
+      ...(Array.isArray(proposed.new_keywords) ? proposed.new_keywords : []),
+    ];
+
+    for (const term of candidates) {
+      if (term) terms.push(String(term));
+    }
+  }
+
+  return terms;
+}
+
+function isProtectedCoreIntentTerm(term, campaignKey) {
+  const t = normalizeTermForCompare(term);
+  const c = normalizeTermForCompare(campaignKey);
+
+  if (!t) return false;
+
+  const protectedPatterns = [
+    "wow gold",
+    "buy wow gold",
+    "world of warcraft gold",
+    "wow tbc gold",
+    "tbc gold",
+    "tbc anniversary gold",
+    "poe currency",
+    "path of exile currency",
+    "poe2 gold",
+    "poe gold",
+    "growtopia",
+    "apex legends",
+    "diablo 4",
+    "d4 gold",
+  ];
+
+  for (const pattern of protectedPatterns) {
+    const p = normalizeTermForCompare(pattern);
+
+    if (t === p || t.includes(p) || p.includes(t)) {
+      // Protect product-intent terms when campaign appears to sell that product/category.
+      if (
+        c.includes("game coin") ||
+        c.includes("wow") ||
+        c.includes("path of exile") ||
+        c.includes("poe") ||
+        c.includes("growtopia") ||
+        c.includes("diablo") ||
+        c.includes("apex")
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function extractNegativeKeywords(rec) {
+  const proposed = rec.proposed_value || {};
+  const values =
+    proposed.negative_keywords ||
+    proposed.keywords ||
+    proposed.terms ||
+    proposed.new_negative_keywords ||
+    [];
+
+  if (!Array.isArray(values)) return [];
+
+  return values.map(String).map((x) => x.trim()).filter(Boolean);
+}
+
+function setNegativeKeywords(rec, terms) {
+  rec.proposed_value = rec.proposed_value || {};
+
+  if (Array.isArray(rec.proposed_value.negative_keywords)) {
+    rec.proposed_value.negative_keywords = terms;
+  } else if (Array.isArray(rec.proposed_value.keywords)) {
+    rec.proposed_value.keywords = terms;
+  } else if (Array.isArray(rec.proposed_value.terms)) {
+    rec.proposed_value.terms = terms;
+  } else {
+    rec.proposed_value.negative_keywords = terms;
+  }
+}
+
+function maybeNormalizeDailyImpact(rec) {
+  const action = rec.action_type;
+  const proposed = rec.proposed_value || {};
+  const current = rec.current_value || {};
+
+  const impact = Number(rec.estimated_daily_impact || 0);
+  if (impact <= 0) return rec;
+
+  let sevenDayTotal = null;
+  let thirtyDayTotal = null;
+
+  if (action === "PAUSE_KEYWORD" || action === "ADD_NEGATIVES") {
+    sevenDayTotal =
+      Number(current.cost_7d || proposed.cost_7d || proposed.wasted_spend_7d || 0) ||
+      null;
+
+    thirtyDayTotal =
+      Number(current.cost_30d || proposed.cost_30d || proposed.wasted_spend_30d || 0) ||
+      null;
+  }
+
+  if (action === "ADD_KEYWORD") {
+    sevenDayTotal =
+      Number(
+        current.conversion_value_7d ||
+          proposed.conversion_value_7d ||
+          proposed.value_7d ||
+          0
+      ) || null;
+
+    thirtyDayTotal =
+      Number(
+        current.conversion_value_30d ||
+          proposed.conversion_value_30d ||
+          proposed.value_30d ||
+          0
+      ) || null;
+  }
+
+  // If Claude already returned daily impact, do not divide again.
+  // Example: cost_7d = 41.61 and impact = 5.94, that is already daily.
+  if (sevenDayTotal) {
+    const daily = sevenDayTotal / 7;
+
+    if (Math.abs(impact - daily) / Math.max(daily, 1) < 0.25) {
+      rec.estimated_daily_impact = daily;
+      return rec;
+    }
+
+    // If impact looks like the full 7d total, convert to daily.
+    if (impact > daily * 2 && impact <= sevenDayTotal * 1.25) {
+      rec.estimated_daily_impact = daily;
+      return rec;
+    }
+  }
+
+  if (thirtyDayTotal) {
+    const daily = thirtyDayTotal / 30;
+
+    if (Math.abs(impact - daily) / Math.max(daily, 1) < 0.25) {
+      rec.estimated_daily_impact = daily;
+      return rec;
+    }
+
+    if (impact > daily * 2 && impact <= thirtyDayTotal * 1.25) {
+      rec.estimated_daily_impact = daily;
+      return rec;
+    }
+  }
+
+  // Fallback: do not blindly divide.
+  return rec;
+}
+
+function cleanClaudeRecommendations(recommendations) {
+  const original = Array.isArray(recommendations) ? recommendations : [];
+  const keywordOpportunityTerms = getKeywordOpportunityTerms(original);
+  const cleaned = [];
+
+  for (const rawRec of original) {
+    const rec = JSON.parse(JSON.stringify(rawRec));
+    maybeNormalizeDailyImpact(rec);
+
+    if (rec.action_type === "ADD_NEGATIVES") {
+      const campaignKey = rec.campaign_key || "";
+      const negativeTerms = extractNegativeKeywords(rec);
+
+      const safeTerms = negativeTerms.filter((term) => {
+        if (isProtectedCoreIntentTerm(term, campaignKey)) {
+          return false;
+        }
+
+        for (const opportunity of keywordOpportunityTerms) {
+          if (areCloseSearchTerms(term, opportunity)) {
+            return false;
+          }
+        }
+
+        return true;
+      });
+
+      if (safeTerms.length === 0) {
+        continue;
+      }
+
+      setNegativeKeywords(rec, safeTerms);
+
+      if (safeTerms.length !== negativeTerms.length) {
+        rec.reason =
+          String(rec.reason || "") +
+          " Cleanup note: removed negative terms that conflicted with keyword opportunities or protected core product intent.";
+      }
+    }
+
+    cleaned.push(rec);
+  }
+
+  cleaned.sort(
+    (a, b) =>
+      Number(b.estimated_daily_impact || 0) -
+      Number(a.estimated_daily_impact || 0)
+  );
+
+  return cleaned.slice(0, 8).map((rec, index) => ({
+    ...rec,
+    recommendation_number: index + 1,
+    id: `${rec.alert_id || "alert"}_${index + 1}`,
+  }));
+}
+
 async function saveClaudeRecommendations(client, data) {
   await client.query(
     `
@@ -73,7 +451,14 @@ async function saveClaudeRecommendations(client, data) {
     ]
   );
 
-  for (const rec of data.recommendations || []) {
+  const cleanedRecommendations = cleanClaudeRecommendations(data.recommendations || []);
+
+  await client.query(
+    `DELETE FROM recommendations WHERE alert_id = $1;`,
+    [data.alert_id]
+  );
+
+  for (const rec of cleanedRecommendations) {
     await client.query(
       `
       INSERT INTO recommendations (
@@ -137,7 +522,7 @@ async function saveClaudeRecommendations(client, data) {
 
 
 function buildSearchTermCandidates(metrics) {
-  const rows = Array.isArray(metrics.search_terms) ? metrics.search_terms : [];
+  const rows = Array.isArray(metrics.search_terms_7d) ? metrics.search_terms_7d : (Array.isArray(metrics.search_terms) ? metrics.search_terms : []);
 
   const negativeGrouped = new Map();
   const keywordGrouped = new Map();
@@ -237,6 +622,40 @@ function buildSearchTermCandidates(metrics) {
   };
 }
 
+
+function buildKeywordPauseCandidates(metrics) {
+  const rows = Array.isArray(metrics.keywords_7d) ? metrics.keywords_7d : (Array.isArray(metrics.keywords) ? metrics.keywords : []);
+
+  return rows
+    .filter((row) => {
+      const campaignName = row.campaign_name || "";
+      const cost = Number(row.cost || 0);
+      const conversions = Number(row.conversions || 0);
+
+      if (campaignName.toLowerCase().includes("branding")) return false;
+      if (!row.keyword_text) return false;
+
+      return cost >= 3 && conversions === 0;
+    })
+    .map((row) => ({
+      action_type: "PAUSE_KEYWORD",
+      campaign_name: row.campaign_name,
+      campaign_id: row.campaign_id || null,
+      ad_group_name: row.ad_group_name || null,
+      ad_group_id: row.ad_group_id || null,
+      keyword_id: row.keyword_id || null,
+      keyword_text: row.keyword_text,
+      match_type: row.match_type || null,
+      cost: Number(row.cost || 0),
+      clicks: Number(row.clicks || 0),
+      conversions: Number(row.conversions || 0),
+      conversion_value: Number(row.conversion_value || 0),
+      roas: Number(row.roas || 0),
+    }))
+    .sort((a, b) => b.cost - a.cost)
+    .slice(0, 20);
+}
+
 async function main() {
   const client = new Client({
     connectionString: process.env.DATABASE_URL,
@@ -249,6 +668,7 @@ async function main() {
     const metrics = snapshot.payload;
 
     metrics.search_term_candidates = buildSearchTermCandidates(metrics);
+    metrics.keyword_pause_candidates = buildKeywordPauseCandidates(metrics);
 
     console.log(
       "Negative keyword candidate groups:",
@@ -257,6 +677,10 @@ async function main() {
     console.log(
       "New keyword candidate groups:",
       metrics.search_term_candidates.new_keywords.length
+    );
+    console.log(
+      "Keyword pause candidates:",
+      metrics.keyword_pause_candidates.length
     );
 
     const alertId = `google_ads_script_${metrics.date}_${Date.now()}`;
@@ -304,11 +728,37 @@ Search term rules:
 - Do not invent search terms. Only use search terms from snapshot.search_terms.
 - Use REVIEW_SEARCH_TERMS only when search_terms are missing or insufficient.
 
-Keyword and budget rules:
-- Use PAUSE_KEYWORD only when actual keyword_text or keyword-level data is present in the snapshot.
-- Use RAISE_BUDGET only when 7-day ROAS, current budget, and budget-limited or Lost IS Budget data are present.
-- Use DECREASE_BUDGET only when 7-day ROAS data is present and the campaign is clearly below threshold.
-- Do not invent keywords, ad groups, budgets, Lost IS, policy status, or 7-day metrics.
+Evidence and action rules:
+- The snapshot includes 1-day, 7-day, and 30-day data when available:
+  campaigns/search_terms/ad_groups/keywords for yesterday,
+  campaigns_7d/search_terms_7d/ad_groups_7d/keywords_7d,
+  campaigns_30d/search_terms_30d/ad_groups_30d/keywords_30d.
+- Prefer 7-day evidence over 1-day evidence for direct actions.
+- Use 30-day evidence as historical context to avoid overreacting to short-term attribution lag.
+- Do not recommend direct mutations from yesterday-only evidence when 7-day data exists.
+- When a recommendation uses 7-day data, estimated_daily_impact MUST equal the 7-day value divided by 7.
+- When a recommendation uses 30-day data, estimated_daily_impact MUST equal the 30-day value divided by 30.
+- Do not label total 7-day conversion value or 7-day wasted spend as daily impact.
+- Include data_window_used in every recommendation: "1d", "7d", "30d", or "1d+7d+30d".
+- Include evidence_metrics in proposed_value or current_value when possible: cost_7d, conversions_7d, conversion_value_7d, roas_7d.
+
+SEM rules:
+- ADD_NEGATIVES: use search_terms_7d first. Recommend only when spend is meaningful and conversions are 0 or ROAS is clearly poor. Use phrase negatives by default only for clearly irrelevant terms.
+- For ADD_NEGATIVES, do not add broad/core product-intent terms as negatives when they are close variants of converting search terms in the same campaign/ad group.
+- For ADD_NEGATIVES, never conflict with ADD_KEYWORD recommendations in the same report. If a term is close to a keyword opportunity, do not recommend it as a negative.
+- ADD_KEYWORD: use search_terms_7d first. Recommend only when the search term has conversions and strong ROAS. Use exact match by default.
+- ADD_KEYWORD must include the exact search term, 7d cost, 7d conversions, 7d conversion value, and 7d ROAS.
+- PAUSE_KEYWORD: use keywords_7d first. Do not pause based on 1-day data only. Recommend only when 7d spend is meaningful and conversions are 0 or ROAS is clearly poor.
+- CONVERT_MATCH_TYPE is not allowed yet unless explicit existing keyword + search term evidence is present.
+
+Demand Gen rules:
+- Do not recommend ADD_NEGATIVES, ADD_KEYWORD, PAUSE_KEYWORD, or CONVERT_MATCH_TYPE for Demand Gen campaigns.
+- Demand Gen recommendations should wait for placement, creative, final URL, audience, budget, or bidding data.
+- Until those data sources exist, omit weak Demand Gen recommendations instead of creating generic review actions.
+
+Budget and bidding rules:
+- Do not recommend RAISE_BUDGET, DECREASE_BUDGET, or ADJUST_TROAS unless current budget, budget utilization or lost impression share/budget-limited evidence is present.
+- Do not invent budgets, Lost IS, tROAS, policy status, final URLs, placement data, or creative performance.
 
 Recommendation quality rules:
 - If the data is not deep enough for a direct action, do not create a recommendation.
@@ -396,7 +846,7 @@ Output rules:
 - Do not output recommendations for Branding campaigns.
 
 Metrics snapshot:
-${JSON.stringify(metrics, null, 2)}
+${JSON.stringify(compactMetricsForClaude(metrics), null, 2)}
 `;
 
     const message = await anthropic.messages.create({
