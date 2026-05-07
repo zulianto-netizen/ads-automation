@@ -452,10 +452,27 @@ async function handleSlackInteraction(request, env) {
         `;
       }
 
-      responseText =
-        `${newStatus === "approved" ? "Approved" : "Declined"} recommendation ` +
-        `#${recommendationNumber || recommendationId || "unknown"}.\n\n` +
-        `Status saved to Neon. Dry-run/apply confirmation will come from the next step.`;
+      if (newStatus === "approved") {
+        const rec = await getRecommendationForButton(
+          sql,
+          recommendationId,
+          alertId,
+          recommendationNumber
+        );
+
+        const preview = rec
+          ? formatWorkerDryRun(rec)
+          : `Could not load dry-run preview for recommendation #${recommendationNumber || "unknown"}.`;
+
+        responseText =
+          `Approved recommendation #${recommendationNumber || recommendationId || "unknown"}.\n` +
+          `Status saved to Neon.\n\n` +
+          preview;
+      } else {
+        responseText =
+          `Declined recommendation #${recommendationNumber || recommendationId || "unknown"}.\n\n` +
+          `Status saved to Neon.`;
+      }
     } else {
       responseText = `Unknown button action: ${clickedAction}`;
     }
