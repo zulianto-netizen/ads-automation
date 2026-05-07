@@ -67,7 +67,19 @@ function pickMetricFields(row) {
     clicks: row.clicks,
     conversions: row.conversions,
     conversion_value: row.conversion_value,
-    roas: row.roas
+    roas: row.roas,
+    channel_type: row.channel_type,
+    bidding_strategy_type: row.bidding_strategy_type,
+    target_roas: row.target_roas,
+    target_cpa: row.target_cpa,
+    daily_budget: row.daily_budget,
+    budget_status: row.budget_status,
+    search_impression_share: row.search_impression_share,
+    search_budget_lost_impression_share: row.search_budget_lost_impression_share,
+    search_rank_lost_impression_share: row.search_rank_lost_impression_share,
+    content_impression_share: row.content_impression_share,
+    content_budget_lost_impression_share: row.content_budget_lost_impression_share,
+    content_rank_lost_impression_share: row.content_rank_lost_impression_share
   };
 }
 
@@ -146,6 +158,9 @@ function compactMetricsForClaude(metrics) {
     keywords: limitRowsForClaude(metrics.keywords, 50),
     keywords_7d: limitRowsForClaude(metrics.keywords_7d, 70),
     keywords_30d: limitRowsForClaude(metrics.keywords_30d, 70),
+
+    budget_bidding_7d: limitRowsForClaude(metrics.budget_bidding_7d, 80),
+    budget_bidding_30d: limitRowsForClaude(metrics.budget_bidding_30d, 80),
 
     // Pre-built candidates, also compacted.
     search_term_candidates: compactCandidatesForClaude(metrics.search_term_candidates, 12),
@@ -369,10 +384,84 @@ function maybeNormalizeDailyImpact(rec) {
   return rec;
 }
 
+
+function recommendationDedupeKey(rec) {
+  const action = String(rec.action_type || "").toUpperCase();
+  const campaign = normalizeTermForCompare(rec.campaign_key || "");
+  const adGroup = normalizeTermForCompare(rec.ad_group_key || "");
+  const keyword =
+    normalizeTermForCompare(
+      rec.keyword_text ||
+        rec.proposed_value?.keyword ||
+        rec.proposed_value?.keyword_text ||
+        rec.current_value?.keyword_text ||
+        ""
+    );
+
+  if (action === "ADD_NEGATIVES") {
+    const terms = extractNegativeKeywords(rec)
+      .map(normalizeTermForCompare)
+      .sort()
+      .join("|");
+
+    return `${action}|${campaign}|${adGroup}|${terms}`;
+  }
+
+  return `${action}|${campaign}|${adGroup}|${keyword}`;
+}
+
+function getPauseKeywordTerms(recommendations) {
+  const terms = [];
+
+  for (const rec of recommendations || []) {
+    if (rec.action_type !== "PAUSE_KEYWORD") continue;
+
+    const term =
+      rec.keyword_text ||
+      rec.current_value?.keyword_text ||
+      rec.proposed_value?.keyword ||
+      rec.proposed_value?.keyword_text;
+
+    if (term) {
+      terms.push({
+        term: String(term),
+        campaign_key: rec.campaign_key || "",
+        ad_group_key: rec.ad_group_key || "",
+      });
+    }
+  }
+
+  return terms;
+}
+
+function negativeConflictsWithPauseKeyword(term, rec, pauseTerms) {
+  const campaign = normalizeTermForCompare(rec.campaign_key || "");
+  const adGroup = normalizeTermForCompare(rec.ad_group_key || "");
+
+  for (const pause of pauseTerms) {
+    const sameCampaign =
+      !pause.campaign_key ||
+      normalizeTermForCompare(pause.campaign_key) === campaign;
+
+    const sameAdGroup =
+      !pause.ad_group_key ||
+      !adGroup ||
+      normalizeTermForCompare(pause.ad_group_key) === adGroup;
+
+    if (sameCampaign && sameAdGroup && areCloseSearchTerms(term, pause.term)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function cleanClaudeRecommendations(recommendations) {
   const original = Array.isArray(recommendations) ? recommendations : [];
   const keywordOpportunityTerms = getKeywordOpportunityTerms(original);
+  const pauseKeywordTerms = getPauseKeywordTerms(original);
   const cleaned = [];
+  const seen = new Set();
 
   for (const rawRec of original) {
     const rec = JSON.parse(JSON.stringify(rawRec));
@@ -384,6 +473,10 @@ function cleanClaudeRecommendations(recommendations) {
 
       const safeTerms = negativeTerms.filter((term) => {
         if (isProtectedCoreIntentTerm(term, campaignKey)) {
+          return false;
+        }
+
+        if (negativeConflictsWithPauseKeyword(term, rec, pauseKeywordTerms)) {
           return false;
         }
 
@@ -405,10 +498,17 @@ function cleanClaudeRecommendations(recommendations) {
       if (safeTerms.length !== negativeTerms.length) {
         rec.reason =
           String(rec.reason || "") +
-          " Cleanup note: removed negative terms that conflicted with keyword opportunities or protected core product intent.";
+          " Cleanup note: removed negative terms that conflicted with keyword opportunities, pause-keyword candidates, or protected core product intent.";
       }
     }
 
+    const key = recommendationDedupeKey(rec);
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
     cleaned.push(rec);
   }
 
@@ -757,7 +857,16 @@ Demand Gen rules:
 - Until those data sources exist, omit weak Demand Gen recommendations instead of creating generic review actions.
 
 Budget and bidding rules:
-- Do not recommend RAISE_BUDGET, DECREASE_BUDGET, or ADJUST_TROAS unless current budget, budget utilization or lost impression share/budget-limited evidence is present.
+- RAISE_BUDGET and DECREASE_BUDGET are allowed for both SEM and Demand Gen only when budget_bidding_7d and budget_bidding_30d evidence exists.
+- Do not recommend budget changes from 1-day data only.
+- RAISE_BUDGET for SEM only when 7d ROAS >= 10x, 30d ROAS is healthy, and search_budget_lost_impression_share or high budget utilization indicates missed volume.
+- RAISE_BUDGET for Demand Gen only when 7d ROAS >= 20x, 30d ROAS is healthy, and content_budget_lost_impression_share or high budget utilization indicates missed volume.
+- DECREASE_BUDGET for SEM only when 7d ROAS is clearly below 5x and 30d trend is also weak.
+- DECREASE_BUDGET for Demand Gen only when 7d ROAS is clearly below 10x and 30d trend is also weak.
+- Budget change size should be conservative: usually 10% to 20%.
+- proposed_value for budget actions must include current_daily_budget, proposed_daily_budget, change_percent, data_window_used, roas_7d, roas_30d, and budget constraint evidence when available.
+- estimated_daily_impact for RAISE_BUDGET should be conservative and may be 0 if upside cannot be estimated safely.
+- Do not recommend ADJUST_TROAS yet unless target_roas is present and there is clear 7d/30d evidence that the target is too restrictive or too loose.
 - Do not invent budgets, Lost IS, tROAS, policy status, final URLs, placement data, or creative performance.
 
 Recommendation quality rules:
