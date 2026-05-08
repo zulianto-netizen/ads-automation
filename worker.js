@@ -499,10 +499,123 @@ async function handleSlackInteraction(request, env) {
   }
 }
 
+
+function isAuthorizedApplyRequest(request, env) {
+  const provided =
+    request.headers.get("x-apply-secret") ||
+    new URL(request.url).searchParams.get("secret");
+
+  return Boolean(env.APPLY_API_SECRET && provided === env.APPLY_API_SECRET);
+}
+
+function compactApprovedAction(row) {
+  return {
+    id: row.id,
+    alert_id: row.alert_id,
+    recommendation_number: row.recommendation_number,
+    action_type: row.action_type,
+    campaign_key: row.campaign_key,
+    ad_group_key: row.ad_group_key,
+    keyword_text: row.keyword_text,
+    current_value: row.current_value || {},
+    proposed_value: row.proposed_value || {},
+    estimated_daily_impact: Number(row.estimated_daily_impact || 0),
+    risk_level: row.risk_level,
+    status: row.status,
+    reason: row.reason,
+  };
+}
+
+async function handleApprovedActions(request, env) {
+  if (!isAuthorizedApplyRequest(request, env)) {
+    return jsonResponse({ ok: false, error: "Unauthorized" }, 401);
+  }
+
+  const sql = neon(env.DATABASE_URL);
+
+  const rows = await sql`
+    SELECT *
+    FROM recommendations
+    WHERE status = 'approved'
+      AND requires_google_ads_mutation = true
+    ORDER BY created_at ASC, recommendation_number ASC
+    LIMIT 20
+  `;
+
+  return jsonResponse({
+    ok: true,
+    count: rows.length,
+    actions: rows.map(compactApprovedAction),
+  });
+}
+
+async function handleApplyResult(request, env) {
+  if (!isAuthorizedApplyRequest(request, env)) {
+    return jsonResponse({ ok: false, error: "Unauthorized" }, 401);
+  }
+
+  const payload = await request.json();
+
+  const recommendationId = payload.recommendation_id || payload.id;
+  const status = payload.status;
+  const result = payload.result || {};
+  const errorMessage = payload.error_message || null;
+
+  if (!recommendationId) {
+    return jsonResponse(
+      { ok: false, error: "Missing recommendation_id" },
+      400
+    );
+  }
+
+  if (!["applied", "failed", "skipped", "dry_run"].includes(status)) {
+    return jsonResponse(
+      { ok: false, error: "Invalid status" },
+      400
+    );
+  }
+
+  const sql = neon(env.DATABASE_URL);
+
+  const rows = await sql`
+    UPDATE recommendations
+    SET
+      status = ${status},
+      applied_at = CASE
+        WHEN ${status} = 'applied' THEN now()
+        ELSE applied_at
+      END,
+      google_ads_result = ${JSON.stringify(result)},
+      error_message = ${errorMessage}
+    WHERE id = ${recommendationId}
+    RETURNING *
+  `;
+
+  if (rows.length === 0) {
+    return jsonResponse(
+      { ok: false, error: "Recommendation not found" },
+      404
+    );
+  }
+
+  return jsonResponse({
+    ok: true,
+    recommendation: compactApprovedAction(rows[0]),
+  });
+}
+
 export default {
   async fetch(request, env) {
     try {
       const path = getPath(request);
+
+      if (request.method === "GET" && path === "/approved-actions") {
+        return await handleApprovedActions(request, env);
+      }
+
+      if (request.method === "POST" && path === "/apply-result") {
+        return await handleApplyResult(request, env);
+      }
 
       if (request.method === "POST" && path === "/slack/interactions") {
         return await handleSlackInteraction(request, env);
