@@ -203,7 +203,10 @@ function formatRecommendation(rec, index) {
       ? ` Add "${keyword}" as exact.`
       : " Add converting term as exact keyword.";
 
-    return `${tag} converting search term — add as managed keyword.${keywordText} Est. +${money(impact)}/day cv.`;
+    const evidenceText = formatAddKeywordEvidence(rec);
+    const evidencePart = evidenceText ? ` — ${evidenceText}` : "";
+
+    return `${tag} converting search term${evidencePart} — add as managed keyword.${keywordText} Est. +${money(impact)}/day cv.`;
   }
 
   if (action === "REVIEW_SEARCH_TERMS") {
@@ -255,6 +258,58 @@ function formatRecommendation(rec, index) {
   return `${tag} ${metricText} — ${action}. Est. impact ${money(impact)}/day.`;
 }
 
+
+
+function formatAddKeywordEvidence(rec) {
+  const proposed = rec.proposed_value || {};
+  const current = rec.current_value || {};
+
+  const cost7d =
+    proposed.cost_7d ??
+    current.cost_7d ??
+    proposed.evidence_metrics?.cost_7d ??
+    current.evidence_metrics?.cost_7d;
+
+  const conversions7d =
+    proposed.conversions_7d ??
+    current.conversions_7d ??
+    proposed.evidence_metrics?.conversions_7d ??
+    current.evidence_metrics?.conversions_7d;
+
+  const value7d =
+    proposed.conversion_value_7d ??
+    current.conversion_value_7d ??
+    proposed.value_7d ??
+    current.value_7d ??
+    proposed.evidence_metrics?.conversion_value_7d ??
+    current.evidence_metrics?.conversion_value_7d;
+
+  const roas7d =
+    proposed.roas_7d ??
+    current.roas_7d ??
+    proposed.evidence_metrics?.roas_7d ??
+    current.evidence_metrics?.roas_7d;
+
+  const parts = [];
+
+  if (cost7d !== undefined && cost7d !== null) {
+    parts.push(`7d $${Number(cost7d || 0).toFixed(2)} spend`);
+  }
+
+  if (conversions7d !== undefined && conversions7d !== null) {
+    parts.push(`${Number(conversions7d || 0)} conv`);
+  }
+
+  if (value7d !== undefined && value7d !== null) {
+    parts.push(`$${Number(value7d || 0).toFixed(2)} cv`);
+  }
+
+  if (roas7d !== undefined && roas7d !== null) {
+    parts.push(`${Number(roas7d || 0).toFixed(2)}x ROAS`);
+  }
+
+  return parts.join(", ");
+}
 
 function formatPauseKeywordEvidence(rec) {
   const current = rec.current_value || {};
