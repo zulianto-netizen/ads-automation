@@ -1,3 +1,6 @@
 .env
 node_modules
 .DS_Store
+
+# Personal health data pulled from COROS -- never commit
+health/data/
